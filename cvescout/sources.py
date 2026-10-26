@@ -46,6 +46,16 @@ class SourceError(RuntimeError):
     """A data source could not be reached or returned an unusable response."""
 
 
+# C0/C1 control characters except tab and newline: an ESC in a CVE description could
+# otherwise rewrite the user's terminal when printed
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(text: str | None) -> str | None:
+    """Third-party text (CVE descriptions, titles, names) without control characters."""
+    return _CONTROL_CHARS.sub("", text) if text else text
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -239,9 +249,9 @@ def affected_products(cve: dict) -> list[str]:
 
 def normalize_nvd(cve: dict) -> dict:
     score, severity, vector, version = _pick_cvss(cve.get("metrics", {}))
-    description = next(
+    description = clean(next(
         (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"), ""
-    )
+    ))
     cwes = sorted(
         {
             d["value"]
@@ -496,7 +506,7 @@ def normalize_ghsa(adv: dict) -> dict:
         "severity": (adv.get("severity") or "").upper() or None,
         "cvss_score": best.get("score") or None,
         "vector": best.get("vector_string"),
-        "summary": adv.get("summary"),
+        "summary": clean(adv.get("summary")),
         "packages": [
             {
                 "ecosystem": v["package"]["ecosystem"],
@@ -616,10 +626,10 @@ def normalize_cvelist(record: dict) -> dict:
     cna = record.get("containers", {}).get("cna", {})
     containers = [cna, *record.get("containers", {}).get("adp", [])]
 
-    description = next(
+    description = clean(next(
         (d["value"] for d in cna.get("descriptions", []) if d.get("lang", "").startswith("en")),
         next((d["value"] for d in cna.get("rejectedReasons", [])), ""),
-    )
+    ))
 
     score = severity = vector = version = None
     for key in CVSS_KEYS:  # newest CVSS version first, the CNA's before ADP's
@@ -681,8 +691,8 @@ def normalize_cvelist(record: dict) -> dict:
                     products.add(_cpe_shorthand(fields[2], fields[3], fields[4]))
     for a in cna.get("affected", []):
         entry = {
-            "vendor": a.get("vendor") or a.get("collectionURL"),
-            "product": a.get("product") or a.get("packageName"),
+            "vendor": clean(a.get("vendor") or a.get("collectionURL")),
+            "product": clean(a.get("product") or a.get("packageName")),
             "versions": [_version_range(v) for v in a.get("versions", []) if v.get("status") == "affected"][:5],
             # What the vendor says about versions not listed: affected / unaffected / unknown
             "default_status": a.get("defaultStatus"),
@@ -695,7 +705,7 @@ def normalize_cvelist(record: dict) -> dict:
         "published": meta.get("datePublished"),
         "last_modified": meta.get("dateUpdated"),
         "status": meta.get("state"),
-        "title": cna.get("title"),
+        "title": clean(cna.get("title")),
         "description": description,
         "cvss_score": score,
         "severity": severity,
@@ -812,7 +822,8 @@ def fetch_cvelist_recent(
             for item in items:
                 current = found.get(item["id"])
                 if current is None or (item["last_modified"] or "") > (current["last_modified"] or ""):
-                    found[item["id"]] = item
+                    # A copy: callers add EPSS/risk and trim descriptions, the cached zip must stay as fetched
+                    found[item["id"]] = dict(item)
 
     start_str = start.strftime("%Y-%m-%dT%H:%M:%S")
     log = _get_json(CVELIST_DELTALOG_URL)
@@ -905,11 +916,11 @@ def fetch_kev_recent(days: float = 30, limit: int = 100) -> dict:
             {
                 "id": v["cveID"],
                 "date_added": v["dateAdded"],
-                "vendor": v.get("vendorProject"),
-                "product": v.get("product"),
-                "name": v.get("vulnerabilityName"),
-                "description": v.get("shortDescription"),
-                "required_action": v.get("requiredAction"),
+                "vendor": clean(v.get("vendorProject")),
+                "product": clean(v.get("product")),
+                "name": clean(v.get("vulnerabilityName")),
+                "description": clean(v.get("shortDescription")),
+                "required_action": clean(v.get("requiredAction")),
                 "due_date": v.get("dueDate"),
                 "ransomware": v.get("knownRansomwareCampaignUse"),
             }

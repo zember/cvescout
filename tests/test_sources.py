@@ -686,3 +686,28 @@ def test_feed_url_requires_cvelist(capsys):
 
     assert main(["feed", "--url", "nodejs.org"]) == 1
     assert "--cvelist" in capsys.readouterr().err
+
+
+def test_control_characters_are_stripped_from_third_party_text():
+    rec = _rec("CVE-2026-1600", "2026-10-26T09:00:00.000Z", desc="Bug\x1b[2J\x1b]0;pwned\x07 in\tx\ny\x9b")
+    c = sources.normalize_cvelist(rec)
+    assert c["description"] == "Bug[2J]0;pwned in\tx\ny"
+
+
+def test_callers_cannot_corrupt_cached_cvelist_records(monkeypatch):
+    zips = {"2026-10-25_delta_CVEs_at_end_of_day.zip": _zip(),
+            "latest.zip": _zip(_rec("CVE-2026-1601", "2026-10-26T09:00:00.000Z", desc="x" * 1000))}
+    _fake_cvelist(monkeypatch, zips)
+    fetch, cache = sources._get, {}
+
+    def cached_get(url, parse, *args, **kwargs):  # like the real _get: parse once, return the same objects
+        if url not in cache:
+            cache[url] = fetch(url, parse, *args, **kwargs)
+        return cache[url]
+
+    monkeypatch.setattr(sources, "_get", cached_get)
+    first = sources.fetch_cvelist_recent(days=1)["cves"][0]
+    first["description"] = first["description"][:10]
+    first["epss"] = {"epss": 0.9}
+    again = sources.fetch_cvelist_recent(days=1)["cves"][0]
+    assert len(again["description"]) == 1000 and "epss" not in again

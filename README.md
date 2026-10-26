@@ -1,24 +1,31 @@
 # cvescout
 
-Wyszukiwanie **najnowszych** CVE z żywych źródeł + agent Claude, który nie może odpowiadać z pamięci.
+**English** | [Polski](README.pl.md)
 
-Dlaczego: model językowy zna tylko CVE sprzed swojej daty odcięcia wiedzy, więc pytany o „najnowsze” podaje stare.
-`cvescout` pobiera dane w momencie zapytania, w oknie czasowym liczonym od dzisiejszej daty:
+[![tests](https://github.com/zember/cvescout/actions/workflows/tests.yml/badge.svg)](https://github.com/zember/cvescout/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-| Źródło | Co daje |
+Find the **latest** CVEs from live sources, rank them by patch priority, and get alerts for your products. Includes a Claude
+agent that is not allowed to answer from memory, and an MCP server so any agent can use the same live data.
+
+Why: a language model only knows the CVEs that existed before its training cutoff, so when asked for the "latest" ones it
+lists old ones. `cvescout` fetches the data at query time, in a time window counted from today:
+
+| Source | What it gives |
 |---|---|
-| [NVD API 2.0](https://nvd.nist.gov/developers/vulnerabilities) | CVE z ostatnich N dni lub od daty, CVSS, CWE, linki do exploitów |
-| [CVE List V5](https://github.com/CVEProject/cvelistV5) | oficjalna lista CVE: ostatnie 30 dni bez limitów zapytań, ok. godzinę przed NVD, wersje podatne od producenta |
-| [GitHub Advisory Database](https://github.com/advisories) | porady dla bibliotek open source: pakiet, podatne wersje, wersja z poprawką |
-| [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | podatności aktywnie wykorzystywane (filtr po `dateAdded`) |
-| [FIRST EPSS](https://www.first.org/epss/) | prawdopodobieństwo exploitacji |
+| [NVD API 2.0](https://nvd.nist.gov/developers/vulnerabilities) | CVEs from the last N days or since a date, CVSS, CWE, exploit links |
+| [CVE List V5](https://github.com/CVEProject/cvelistV5) | the official CVE list: last 30 days with no rate limit, about an hour ahead of NVD, vendor-supplied affected versions |
+| [GitHub Advisory Database](https://github.com/advisories) | advisories for open-source packages: package, vulnerable range, patched version |
+| [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | vulnerabilities exploited in the wild (filtered by `dateAdded`) |
+| [FIRST EPSS](https://www.first.org/epss/) | probability of exploitation in the next 30 days |
 
-Agent (`claude-opus-5-5`) ma narzędzia do tych źródeł, prompt zakazujący cytowania CVE z pamięci oraz twardy
-post-check: każde CVE w odpowiedzi, którego nie zwróciło żadne narzędzie, jest oznaczane ostrzeżeniem.
-Te same narzędzia udostępnia [serwer MCP](#serwer-mcp) – wtedy agentem jest Claude Code, Claude Desktop
-lub Twój własny agent, bez osobnego klucza API.
+The agent (`claude-opus-5-5`) has tools for these sources, a prompt that forbids citing CVEs from memory, and a hard
+post-check: any CVE in its answer that no tool returned is flagged with a warning. The same tools are exposed by the
+[MCP server](#mcp-server), so Claude Code, Claude Desktop or your own agent can use them without a separate API key.
 
-## Instalacja
+## Installation
+
+Requires Python 3.11 or newer.
 
 macOS / Linux:
 
@@ -26,8 +33,6 @@ macOS / Linux:
 git clone https://github.com/zember/cvescout.git && cd cvescout
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
-
-Wymaga Pythona 3.11 lub nowszego.
 
 Windows (cmd):
 
@@ -37,117 +42,118 @@ python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
 ```
 
-Klucze (wszystkie opcjonalne poza `ANTHROPIC_API_KEY` dla `ask`); w cmd zamiast `export` użyj `set` (lub `setx` na stałe):
+API keys are all optional except `ANTHROPIC_API_KEY` for `ask`. In cmd use `set` instead of `export` (or `setx` to keep it):
 
 ```bash
-export NVD_API_KEY=...        # 50 zamiast 5 zapytań / 30 s: https://nvd.nist.gov/developers/request-an-api-key
-export GITHUB_TOKEN=...       # 5000 zamiast 60 zapytań / h do GHSA, np. $(gh auth token)
-export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`); serwer MCP go nie potrzebuje
+export NVD_API_KEY=...        # 50 instead of 5 requests / 30 s: https://nvd.nist.gov/developers/request-an-api-key
+export GITHUB_TOKEN=...       # 5000 instead of 60 requests / h for GHSA, e.g. $(gh auth token)
+export ANTHROPIC_API_KEY=...  # only for `cvescout ask` (or `ant auth login`); the MCP server does not need it
 ```
 
-## Uruchamianie bez `activate`
+## Running without `activate`
 
-- **Windows:** w katalogu projektu jest `cvescout.cmd`. Uruchom `C:\sciezka\do\cvescout\cvescout.cmd feed --days 2`
-  albo dodaj katalog projektu do zmiennej PATH – wtedy w dowolnym oknie cmd działa samo `cvescout feed --days 2`.
-- **macOS / Linux:** `ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout` (katalog `~/.local/bin` musi być w PATH).
-- **Dowolny system:** `pipx install -e .` instaluje `cvescout` globalnie w osobnym środowisku.
+- **Windows:** the project folder contains `cvescout.cmd`. Run `C:\path\to\cvescout\cvescout.cmd feed --days 2`, or add
+  the project folder to PATH so that `cvescout feed --days 2` works in any cmd window.
+- **macOS / Linux:** `ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout` (`~/.local/bin` must be on PATH).
+- **Any system:** `pipx install -e .` installs `cvescout` globally in its own environment.
 
-## Użycie
+## Usage
 
 ```bash
-cvescout feed --days 2                               # CVE z ostatnich 48 h, najnowsze pierwsze
-cvescout feed --days 7 --severity CRITICAL --enrich  # krytyczne z tygodnia + EPSS/KEV/ryzyko
-cvescout feed --days 7 --sort risk                   # tydzień, najpilniejsze do załatania pierwsze
+cvescout feed --days 2                               # CVEs from the last 48 h, newest first
+cvescout feed --days 7 --severity CRITICAL --enrich  # this week's critical ones + EPSS/KEV/risk
+cvescout feed --days 7 --sort risk                   # this week, most urgent to patch first
 cvescout feed --days 30 --keyword fortinet
-cvescout feed --days 30 --kev                        # dodane do CISA KEV w ostatnim miesiącu
+cvescout feed --days 30 --kev                        # added to CISA KEV in the last month
 cvescout feed --days 1 --json
 ```
 
-### Wynik: dla ludzi czy dla agentów
+### Output: for people or for agents
 
-| Tryb | Dla kogo | Co zawiera |
+| Mode | For | Contents |
 |---|---|---|
-| `cvescout feed`, `cvescout cpe` | człowiek | tabela: data, ID, CVSS, znaczniki `RCE`/`PoC`/`EXPLOITED`, opis skrócony do 100 znaków |
-| `cvescout feed --json`, `cvescout cpe --json` | skrypty, inne agenty, pipeline'y | pełne dane: cały opis, CWE, wektor CVSS, linki, `exploit_refs`, `affected_products`, EPSS/KEV (z `--enrich`) |
-| `cvescout ask` | człowiek | odpowiedź agenta Claude w języku pytania |
-| `cvescout mcp` | agenty (Claude Code, Claude Desktop, inne klienty MCP) | narzędzia zwracające JSON, jak w `ask` |
+| `cvescout feed`, `cvescout cpe` | people | table: date, ID, CVSS, `RCE`/`PoC`/`EXPLOITED` tags, description cut to 100 characters |
+| `cvescout feed --json`, `cvescout cpe --json` | scripts, other agents, pipelines | full data: whole description, CWE, CVSS vector, links, `exploit_refs`, `affected_products`, EPSS/KEV (with `--enrich`) |
+| `cvescout ask` | people | the Claude agent's answer, in the language of the question |
+| `cvescout mcp` | agents (Claude Code, Claude Desktop, other MCP clients) | tools returning JSON, as in `ask` |
 
-Tabela może się zmieniać i ucina dane – programy powinny czytać `--json`. Błędy trafiają na stderr, a kod wyjścia wynosi 1,
-więc skrypt może łatwo wykryć niepowodzenie. Agent wbudowany w `ask` nie czyta tabeli – jego narzędzia dostają JSON bezpośrednio.
+The table may change and truncates data, so programs should read `--json`. Errors go to stderr with exit code 1, so a
+script can detect failures. The agent behind `ask` does not read the table; its tools get JSON directly.
 
-### Filtry
+### Filters
 
-| Opcja | Znaczenie |
+| Option | Meaning |
 |---|---|
 | `--min-score 8` | CVSS ≥ 8 |
-| `--severity HIGH` | kategoria ważności co najmniej HIGH (≥ 7.0) |
-| `--rce` | prawdopodobne zdalne wykonanie kodu (heurystyka: CWE wstrzyknięcia kodu/poleceń lub opis, wektor sieciowy `AV:N`, bez XSS) |
-| `--poc` | znany publiczny exploit (PoC) lub aktywna exploitacja |
-| `--any` | wystarczy **jeden** z powyższych warunków (domyślnie muszą być spełnione **wszystkie**) |
-| `--since 2020-01-01` | od daty zamiast `--days` |
-| `--keyword X` | słowo w opisie; powtórzone = „albo” |
-| `--cpe vendor:product` | dokładny produkt w NVD, np. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; powtórzone = „albo”. Nazwę znajdzie `cvescout cpe` |
+| `--severity HIGH` | severity at least HIGH (≥ 7.0) |
+| `--rce` | likely remote code execution (heuristic: code/command-injection CWE or wording, network vector `AV:N`, no XSS) |
+| `--poc` | known public exploit (PoC) or active exploitation |
+| `--any` | **one** of the conditions above is enough (by default **all** must hold) |
+| `--since 2020-01-01` | from a date instead of `--days` |
+| `--keyword X` | word in the description; repeat for OR |
+| `--cpe vendor:product` | exact product in NVD, e.g. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; repeat for OR. `cvescout cpe` finds the name |
 
 ```bash
-cvescout feed --days 7 --rce --min-score 8                  # RCE i CVSS >= 8
-cvescout feed --days 7 --rce --min-score 8 --any            # RCE albo CVSS >= 8
-cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 z publicznym exploitem
-cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce          # RCE w Node.js albo curl od 2020
-cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # szerzej, po słowach z opisu
+cvescout feed --days 7 --rce --min-score 8                  # RCE and CVSS >= 8
+cvescout feed --days 7 --rce --min-score 8 --any            # RCE or CVSS >= 8
+cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 with a public exploit
+cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce          # RCE in Node.js or curl since 2020
+cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # broader, by description words
 ```
 
-Kolumna po ocenie pokazuje `RCE`, `PoC` (exploit publiczny) lub `EXPLOITED` (aktywnie wykorzystywana).
+The column after the score shows `RCE`, `PoC` (public exploit) or `EXPLOITED` (exploited in the wild).
 
-- NVD przyjmuje zakres dat do 120 dni. Dłuższy zakres (`--since`) wymaga `--keyword` albo `--cpe` – wtedy pobierana
-  jest cała historia produktu i przycinana lokalnie.
-- `--cpe` jest dokładniejsze niż `--keyword`: zwraca tylko CVE, w których NVD oznaczył produkt jako **podatny**
-  (pomija np. aplikacje, które jedynie „działają na” Linuksie). Obejmuje jednak tylko CVE już przeanalizowane przez NVD –
-  to trwa od kilku dni do tygodni, więc dla najświeższych CVE użyj `--keyword`.
-- `--poc` korzysta z linków oznaczonych przez NVD jako „Exploit”, oceny CISA SSVC, dojrzałości exploita w CVSS v4 i CISA KEV.
-  Brak oznaczenia nie znaczy, że exploita nie ma.
-- `--rce` to heurystyka – traktuj wynik jako „prawdopodobne RCE” i sprawdzaj opis.
-- CVE odrzucone (REJECTED: duplikaty, numery nadane przez pomyłkę, zgłoszenia, które nie okazały się podatnością) są pomijane.
-  `get_cve_details` dla pojedynczego CVE nadal pokazuje status odrzucenia.
+- NVD accepts date ranges of up to 120 days. A longer range (`--since`) needs `--keyword` or `--cpe`: the product's
+  whole history is fetched and trimmed locally.
+- `--cpe` is more precise than `--keyword`: it returns only CVEs where NVD marked the product as **vulnerable** (it
+  skips e.g. applications that merely "run on" Linux). It only covers CVEs NVD has already analyzed, which takes days
+  to weeks, so for the newest CVEs use `--keyword`, or `--cvelist` with `--url` (below).
+- `--poc` uses references NVD tagged "Exploit", CISA SSVC, CVSS v4 exploit maturity and CISA KEV. No tag does not mean
+  there is no exploit: exploits published only in blog posts are often missed.
+- `--rce` is a heuristic: treat results as "likely RCE" and read the description.
+- Rejected CVEs (REJECTED: duplicates, IDs assigned by mistake, reports that turned out not to be vulnerabilities) are
+  skipped. `get_cve_details` for a single CVE still shows the rejection.
 
-### Wynik ryzyka: co łatać najpierw
+### Risk score: what to patch first
 
 ```bash
-cvescout feed --days 7 --sort risk --limit 20                  # tydzień, najpilniejsze pierwsze
+cvescout feed --days 7 --sort risk --limit 20                  # this week, most urgent first
 cvescout feed --cvelist --days 3 --sort risk --keyword php
 cvescout feed --ghsa --days 30 --ecosystem npm --sort risk
 ```
 
-`--sort risk` dodaje EPSS i KEV, ocenia **wszystkie** pasujące CVE (nie tylko najnowsze `--limit`) i sortuje je wg priorytetu.
-`--enrich` dodaje ten sam wynik bez zmiany kolejności. W `--json` każde CVE ma pole
-`risk: {score, priority, factors}`, a `factors` wyjaśnia ocenę (np. `actively exploited (CISA KEV)`, `EPSS 34.00%`, `CVSS 9.8`).
+`--sort risk` adds EPSS and KEV, scores **all** matching CVEs (not just the newest `--limit`) and sorts them by priority.
+`--enrich` adds the same score without reordering. In `--json` every CVE has
+`risk: {score, priority, factors}`, and `factors` explains the rating (e.g. `actively exploited (CISA KEV)`,
+`EPSS 34.00%`, `CVSS 9.8`).
 
-| Priorytet | Kiedy |
+| Priority | When |
 |---|---|
-| `critical` | aktywnie wykorzystywana (CISA KEV, SSVC „active”, CVSS v4 `E:A`) |
-| `high` | publiczny exploit lub EPSS ≥ 10% przy CVSS ≥ 7 (lub nieznanym), albo prawdopodobne RCE z CVSS ≥ 9 |
-| `medium` | publiczny exploit lub EPSS ≥ 10% (przy niższym CVSS), albo CVSS ≥ 9, albo CVSS ≥ 7 razem z prawdopodobnym RCE **lub** EPSS ≥ 1% |
-| `low` | pozostałe, m.in. CVSS 7–8.9 bez RCE, bez exploita i z EPSS < 1% |
+| `critical` | exploited in the wild (CISA KEV, SSVC "active", CVSS v4 `E:A`) |
+| `high` | public exploit or EPSS ≥ 10% with CVSS ≥ 7 (or unknown), or likely RCE with CVSS ≥ 9 |
+| `medium` | public exploit or EPSS ≥ 10% (with lower CVSS), or CVSS ≥ 9, or CVSS ≥ 7 together with likely RCE **or** EPSS ≥ 1% |
+| `low` | the rest, e.g. CVSS 7–8.9 without RCE, without an exploit and with EPSS < 1% |
 
-Do `medium` wystarczy RCE **albo** EPSS ≥ 1%. Żeby zobaczyć tylko RCE, dodaj filtr: `cvescout feed --days 7 --sort risk --rce`.
+For `medium`, likely RCE **or** EPSS ≥ 1% is enough. To see only RCE, add the filter: `cvescout feed --days 7 --sort risk --rce`.
 
-`score` (0–100) porządkuje CVE w obrębie priorytetu: 50% zagrożenie (wykorzystywana 1.0, PoC 0.7, EPSS przeskalowany tak,
-że 10% liczy się jak PoC) + 40% CVSS + 10% prawdopodobne RCE. Zagrożenie waży najwięcej, bo większość CVE – nawet
-krytycznych – nigdy nie jest wykorzystywana. To heurystyka cvescout, nie oficjalna ocena; świeże CVE nie mają jeszcze EPSS
-(`no EPSS yet`), więc ich wynik opiera się na CVSS i znanych exploitach.
+`score` (0–100) orders CVEs within a priority: 50% threat (exploited 1.0, PoC 0.7, EPSS scaled so that 10% counts like a
+PoC) + 40% CVSS + 10% likely RCE. Threat weighs most because most CVEs, even critical ones, are never exploited. This
+is cvescout's heuristic, not an official rating. New CVEs have no EPSS yet (`no EPSS yet`), so their score rests on CVSS
+and known exploits. On one week of NVD data (4061 CVEs) this gave 4 critical, 219 high, 735 medium and 3103 low.
 
-### Wersje podatne podane przez producenta
+### Vendor-supplied affected versions
 
-Pole `affected` (CVE List, `get_cve_details`) pokazuje wersje zgłoszone przez producenta (CNA), a `default_status` –
-co producent mówi o pozostałych wersjach (`affected`, `unaffected`, `unknown` lub brak).
-**Producenci zwykle podają tylko wspierane gałęzie.** Przykład: CVE-2026-109618 w PHP wymienia 8.2–8.5 z
-`default_status: unaffected`, choć starsze, niewspierane wersje (np. 7.x) mogą mieć ten sam błąd – po prostu nikt ich
-nie sprawdzał i nie dostaną poprawki. Brak wersji na liście nie znaczy, że jest bezpieczna; agent i serwer MCP mają to
-w instrukcjach i dostają tę uwagę w polu `affected_note`.
+The `affected` field (CVE List, `get_cve_details`) shows the versions the vendor (CNA) reported, and `default_status`
+what the vendor says about all other versions (`affected`, `unaffected`, `unknown` or missing).
+**Vendors usually list only supported branches.** Example: CVE-2026-109618 in PHP lists 8.2–8.5 with
+`default_status: unaffected`, although older, unsupported versions (e.g. 7.x) may have the same bug: nobody checked
+them and they will get no fix. A version missing from the list is not a safe version; the agent and the MCP server
+have this in their instructions and get the warning in the `affected_note` field.
 
-### Nazwy CPE: `cvescout cpe`
+### CPE names: `cvescout cpe`
 
-Nazwa w CPE ma postać `producent:produkt`, a producent często różni się od potocznej nazwy
-(curl to `haxx:curl` – od Haxx AB, firmy autora curl). `cvescout cpe` wyszukuje ją w słowniku CPE NVD:
+A CPE name has the form `vendor:product`, and the vendor often differs from the common name (curl is `haxx:curl`, after
+Haxx AB, the company of curl's author). `cvescout cpe` looks it up in the NVD CPE dictionary:
 
 ```
 $ cvescout cpe nginx
@@ -159,79 +165,79 @@ CPE products for 'nginx':
 Use: cvescout feed --cpe f5:nginx --since 2020-01-01
 ```
 
-Najpierw są produkty o pasującej nazwie, potem pozostałe. Przy wycofanych nazwach widać, czym je zastąpiono.
-Systemy operacyjne mają prefiks `o:` (np. `o:linux:linux_kernel`), sprzęt `h:`.
+Products whose name matches come first. Deprecated names show what replaced them. Operating systems have the `o:`
+prefix (e.g. `o:linux:linux_kernel`), hardware `h:`.
 
 ### CVE List (CVEProject/cvelistV5)
 
 ```bash
-cvescout feed --cvelist --days 1                          # wszystko z ostatnich 24 h, bez limitów NVD
-cvescout feed --cvelist --days 7 --rce --min-score 8      # te same filtry co dla NVD
-cvescout feed --cvelist --days 3 --keyword nginx --json   # słowo w opisie, tytule, nazwie producenta lub produktu
-cvescout feed --cvelist --days 7 --url nodejs.org/en/blog/vulnerability   # CVE, do których linkuje biuletyn Node.js
+cvescout feed --cvelist --days 1                          # everything from the last 24 h, no NVD rate limit
+cvescout feed --cvelist --days 7 --rce --min-score 8      # the same filters as for NVD
+cvescout feed --cvelist --days 3 --keyword nginx --json   # word in the description, title, vendor or product name
+cvescout feed --cvelist --days 7 --url nodejs.org/en/blog/vulnerability   # CVEs linked from Node.js advisories
 ```
 
-`--url` dopasowuje fragment linku w referencjach CVE. Najlepiej podać stronę biuletynów bezpieczeństwa producenta: znajdzie
-wtedy także CVE zgłoszone dla **biblioteki dołączonej do produktu**. Przykład: CVE-2026-111497 zgłosił Google dla Brotli –
-w opisie nie ma słowa „Node.js”, NVD jeszcze nie przypisał CPE, a jedynym śladem jest link do biuletynu Node.js.
-`--keyword node.js` i `--cpe nodejs:node.js` go nie znajdą, `--url nodejs.org/en/blog/vulnerability` – tak.
+`--url` matches part of a reference link. The vendor's security advisory page works best: it also finds CVEs filed
+under a **library bundled with the product**. Example: CVE-2026-111497 was filed by Google for Brotli. Its description
+never mentions Node.js, NVD has not assigned CPEs yet, and the only trace is a link to the Node.js security release.
+`--keyword node.js` and `--cpe nodejs:node.js` miss it; `--url nodejs.org/en/blog/vulnerability` finds it.
 
-`--cvelist` czyta oficjalną listę CVE zamiast NVD: dzienne paczki zmian z
-[GitHub Releases](https://github.com/CVEProject/cvelistV5/releases) (kilka MB na dzień) uzupełnione indeksem `deltaLog.json`.
+`--cvelist` reads the official CVE list instead of NVD: the daily change files from
+[GitHub Releases](https://github.com/CVEProject/cvelistV5/releases) (a few MB per day), completed with the `deltaLog.json` index.
 
-- **Szybciej:** tydzień danych pobiera się w kilka sekund, bez limitu 5 zapytań / 30 s; CVE pojawia się tu ok. godzinę przed NVD.
-- **Tylko 30 dni wstecz.** Dla dłuższych zakresów (`--since 2020-01-01`) użyj NVD.
-- **Dane od CNA** (producenta lub innego wydawcy CVE) oraz CISA Vulnrichment (SSVC, KEV), bez analizy NVD:
-  ocena CVSS czasem się różni, a `--cpe` działa tylko, gdy wydawca podał CPE – dla CVE List lepiej użyć `--keyword`.
-- W `--json` każde CVE ma pole `affected`: producent, produkt i podatne wersje (np. `1.0 - <1.4`).
-- `get_cve_details` (agent i MCP) dokłada `affected` z CVE List do danych NVD, a gdy NVD nie działa
-  lub jeszcze nie ma danego CVE, zwraca rekord z CVE List.
+- **Faster:** a week of data downloads in seconds, without the 5 requests / 30 s limit; CVEs show up about an hour before NVD.
+- **Last 30 days only.** For longer ranges (`--since 2020-01-01`) use NVD.
+- **Data from the CNA** (the vendor or other CVE issuer) and CISA Vulnrichment (SSVC, KEV), without NVD analysis: the
+  CVSS score sometimes differs, and `--cpe` only works where the issuer supplied CPEs, so prefer `--keyword` or `--url`.
+- In `--json` every CVE has an `affected` field: vendor, product and vulnerable versions (e.g. `1.0 - <1.4`).
+- `get_cve_details` (agent and MCP) adds `affected` from the CVE List to the NVD data, and when NVD is down or does not
+  have the CVE yet, returns the CVE List record.
 
 ### GitHub Advisory Database
 
 ```bash
-cvescout feed --ghsa --days 7 --ecosystem npm --severity HIGH   # porady dla pakietów npm
+cvescout feed --ghsa --days 7 --ecosystem npm --severity HIGH   # advisories for npm packages
 cvescout feed --ghsa --days 30 --package django --rce
 ```
 
-Porady GitHub „reviewed” (domyślne) pojawiają się z opóźnieniem względem NVD, bo GitHub je ręcznie weryfikuje;
-`--unreviewed` dokłada nieprzejrzane, zwykle kopie wpisów z NVD bez danych o pakietach.
-Dla `--ghsa` zwracanych jest najwyżej 100 najnowszych porad na zapytanie, więc długie zakresy (`--since`) są niepełne.
+GitHub "reviewed" advisories (the default) appear later than NVD because GitHub checks them by hand; `--unreviewed`
+adds the unreviewed ones, usually NVD copies without package data. `--ghsa` returns at most the newest 100 advisories
+per query, so long ranges (`--since`) are incomplete.
 
 ### Agent
 
 ```bash
-cvescout ask -v "Jakie krytyczne CVE pojawiły się w ostatnich 3 dniach?"
-cvescout ask "Pokaż RCE w Node.js albo curl od 2020 z publicznym exploitem"
+cvescout ask -v "Which critical CVEs were published in the last 3 days?"
+cvescout ask "Show RCE in Node.js or curl since 2020 with a public exploit"
 ```
 
-Agent sam dobiera filtry (RCE, próg CVSS, PoC, produkty, daty), w razie potrzeby wyszukuje nazwy CPE
-i podaje, które filtry zastosował.
+The agent picks the filters itself (RCE, CVSS threshold, PoC, products, dates), looks up CPE names when needed and
+says which filters it applied.
 
-Długie zakresy dla dużych produktów (np. jądro Linux od 2020) wymagają wielu zapytań do NVD –
-bez `NVD_API_KEY` trwa to kilka minut.
+Long ranges for large products (e.g. the Linux kernel since 2020) need many NVD requests: without `NVD_API_KEY` this
+takes a few minutes.
 
-## Alerty o nowych CVE: `cvescout watch`
+## Alerts about new CVEs: `cvescout watch`
 
-`cvescout watch` sprawdza nowe CVE dla wybranych produktów, ocenia je [wynikiem ryzyka](#wynik-ryzyka-co-łatać-najpierw)
-i zgłasza każde CVE **raz** – ponownie tylko wtedy, gdy jego priorytet wzrośnie (np. CISA doda je do KEV).
-**Nic nie uruchamia się samo:** każde `watch run` to jedno sprawdzenie; cykliczne uruchamianie trzeba włączyć samemu.
+`cvescout watch` checks for new CVEs in the products you choose, rates them with the
+[risk score](#risk-score-what-to-patch-first) and reports each CVE **once**, again only if its priority rises (e.g.
+when CISA adds it to KEV). **Nothing runs on its own:** each `watch run` is a single check; you schedule it yourself.
 
 ```bash
-cvescout watch init             # tworzy przykładową konfigurację
-cvescout watch run --dry-run    # pokazuje alerty bez zapisywania i wysyłania
-cvescout watch run              # sprawdza, zapisuje stan, wysyła alerty
-cvescout watch list             # wcześniejsze alerty
-cvescout watch schedule         # wypisuje linię dla cron / Harmonogramu zadań (nic nie instaluje)
+cvescout watch init             # creates an example config
+cvescout watch run --dry-run    # shows alerts without storing or sending them
+cvescout watch run              # checks, stores state, sends alerts
+cvescout watch list             # past alerts
+cvescout watch schedule         # prints a cron / Task Scheduler line (installs nothing)
 ```
 
-Konfiguracja: `~/.config/cvescout/watch.toml` (Windows: `%APPDATA%\cvescout\watch.toml`) albo dowolny plik przez `--config`.
-Stan (SQLite) leży obok, w `watch.db`.
+Config: `~/.config/cvescout/watch.toml` (Windows: `%APPDATA%\cvescout\watch.toml`), or any file with `--config`.
+State (SQLite) is kept next to it, in `watch.db`.
 
 ```toml
-source = "cvelist"        # "cvelist" (świeże, do 30 dni wstecz) albo "nvd"
-min_priority = "high"     # critical, high, medium albo low
-initial_days = 7          # jak daleko wstecz patrzy pierwsze uruchomienie
+source = "cvelist"        # "cvelist" (fresh, up to 30 days back) or "nvd"
+min_priority = "high"     # critical, high, medium or low
+initial_days = 7          # how far back the first run looks
 
 [[watch]]
 name = "curl"
@@ -240,83 +246,84 @@ keywords = ["curl"]
 [[watch]]
 name = "Node.js"
 cpes = ["nodejs:node.js"]
-urls = ["nodejs.org/en/blog/vulnerability"]   # zawsze szukane w CVE List
-source = "nvd"            # nadpisanie dla jednego produktu (dotyczy keywords i cpes)
+urls = ["nodejs.org/en/blog/vulnerability"]   # always searched in the CVE List
+source = "nvd"            # per-product override (applies to keywords and cpes)
 min_priority = "medium"
 
 [notify]
 webhook_url = "https://hooks.slack.com/services/..."
-webhook_format = "slack"  # slack, discord albo json
+webhook_format = "slack"  # slack, discord or json
 ```
 
-- Wystarczy jedno dopasowanie: `keywords`, `cpes` albo `urls`.
-- `keywords` są szerokie: `node.js` pasuje do każdego „… is a Node.js CMS”. Dla takich produktów użyj `cpes`
-  (nazwę znajdzie `cvescout cpe`) i `source = "nvd"` – CVE List ma CPE tylko od części producentów.
-  NVD przypisuje CPE z opóźnieniem kilku dni, za to bez fałszywych trafień.
-- `urls` (fragment linku w referencjach, zawsze z CVE List) łapie CVE od razu i także w bibliotekach dołączonych do
-  produktu – np. biuletyn Node.js linkuje CVE w Brotli. W tygodniu 19–26.10 tylko `urls` znalazło 10 CVE Node.js,
-  bo NVD nie przypisał im jeszcze CPE.
-- Każde uruchomienie zaczyna od czasu poprzedniego (z godzinnym zapasem), a CVE z ostatnich 30 dni ocenia od nowa
-  (EPSS i KEV zmieniają się po publikacji), więc alert przyjdzie także dla starszego CVE, które właśnie trafiło do KEV.
-- Alerty zawsze trafiają na stdout (`--json` dla skryptów), a z `webhook_url` także na webhook. Jeśli webhook nie odpowie,
-  alerty nie są oznaczane jako wysłane i przyjdą przy następnym uruchomieniu.
-- Niektórzy producenci (np. curl) nie podają CVSS – do czasu oceny przez NVD wynik ryzyka liczy brak CVSS jako 5.0.
+- One match is enough: `keywords`, `cpes` or `urls`.
+- `keywords` are broad: `node.js` matches every "… is a Node.js CMS". For such products use `cpes` (find the name with
+  `cvescout cpe`) and `source = "nvd"`, because the CVE List has CPEs from only some vendors. NVD assigns CPEs a few
+  days late, but without false matches.
+- `urls` (part of a reference link, always from the CVE List) catches CVEs right away, including those in libraries the
+  product bundles: the Node.js advisory page links the Brotli CVE. In the week of 19–26 Oct 2026 only `urls` found the
+  10 Node.js CVEs, because NVD had not assigned them CPEs yet.
+- Each run starts where the previous one ended (with an hour of overlap) and re-scores CVEs from the last 30 days (EPSS
+  and KEV change after publication), so you also get an alert when an older CVE has just been added to KEV.
+- Alerts always go to stdout (`--json` for scripts), and with `webhook_url` also to the webhook. If the webhook does not
+  answer, the alerts are not marked as sent and come again on the next run.
+- Some vendors (e.g. curl) publish no CVSS: until NVD scores the CVE, the risk score counts the missing CVSS as 5.0.
 
-### Włączenie cyklicznego sprawdzania
+### Turning on periodic checks
 
-`cvescout watch schedule` wypisuje gotowe polecenie z właściwymi ścieżkami. Dla macOS / Linux (cron, co godzinę):
+`cvescout watch schedule` prints the command with the right paths. macOS / Linux (cron, every hour):
 
 ```bash
 crontab -e
-# dopisz:
-0 * * * * "/sciezka/do/cvescout/.venv/bin/cvescout" watch run >> "$HOME/.config/cvescout/watch.log" 2>&1
+# add:
+0 * * * * "/path/to/cvescout/.venv/bin/cvescout" watch run >> "$HOME/.config/cvescout/watch.log" 2>&1
 ```
 
-Windows (cmd, Harmonogram zadań, co godzinę):
+Windows (cmd, Task Scheduler, every hour):
 
 ```bat
-schtasks /Create /SC HOURLY /TN cvescout-watch /TR "\"C:\sciezka\do\cvescout\.venv\Scripts\cvescout.exe\" watch run"
+schtasks /Create /SC HOURLY /TN cvescout-watch /TR "\"C:\path\to\cvescout\.venv\Scripts\cvescout.exe\" watch run"
 schtasks /Delete /TN cvescout-watch
 ```
 
-Wyłączenie: usuń linię z `crontab -e` albo zadanie `cvescout-watch`.
+To turn it off, remove the line from `crontab -e` or delete the `cvescout-watch` task.
 
-## Serwer MCP
+## MCP server
 
-`cvescout mcp` uruchamia serwer [MCP](https://modelcontextprotocol.io) (stdio) z tymi samymi narzędziami co agent `ask`:
-`get_current_datetime`, `search_recent_cves` (NVD lub `source="cvelist"`), `search_github_advisories`,
-`find_cpe_name`, `get_cve_details`, `get_recent_exploited`. Serwer nie wywołuje modelu, więc nie potrzebuje `ANTHROPIC_API_KEY` –
-pytania obsługuje klient (np. Claude Code w ramach Twojej subskrypcji). Instrukcje serwera zakazują klientowi cytowania CVE z pamięci;
-twardego post-checku z `ask` tu nie ma, bo odpowiedź pisze klient.
+`cvescout mcp` runs an [MCP](https://modelcontextprotocol.io) server (stdio) with the same tools as the `ask` agent:
+`get_current_datetime`, `search_recent_cves` (NVD or `source="cvelist"`, `sort_by="risk"`, `reference_urls`),
+`search_github_advisories`, `find_cpe_name`, `get_cve_details`, `get_recent_exploited`. All tools are read-only. The
+server never calls a model, so it needs no `ANTHROPIC_API_KEY`: the client answers the questions (e.g. Claude Code on
+your subscription). The server's instructions forbid the client to cite CVEs from memory or to follow instructions
+found inside CVE data; the hard post-check of `ask` is not available here, because the client writes the answer.
 
-**Claude Code** (dla wszystkich projektów; nowa sesja zobaczy narzędzia `mcp__cvescout__*`):
+**Claude Code** (for all projects; a new session sees the `mcp__cvescout__*` tools):
 
 ```bash
 claude mcp add --scope user cvescout -- "$PWD/.venv/bin/cvescout" mcp
 ```
 
 ```bat
-claude mcp add --scope user cvescout -- C:\sciezka\do\cvescout\.venv\Scripts\cvescout.exe mcp
+claude mcp add --scope user cvescout -- C:\path\to\cvescout\.venv\Scripts\cvescout.exe mcp
 ```
 
-**Claude Desktop** – w `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
+**Claude Desktop**, in `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
 Windows: `%APPDATA%\Claude\`):
 
 ```json
 {
   "mcpServers": {
     "cvescout": {
-      "command": "/Users/ty/dev/cvescout/.venv/bin/cvescout",
+      "command": "/Users/you/dev/cvescout/.venv/bin/cvescout",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-Na Windows `"command": "C:\\sciezka\\do\\cvescout\\.venv\\Scripts\\cvescout.exe"`. Klucze `NVD_API_KEY` i `GITHUB_TOKEN`
-można przekazać w polu `"env"` tej samej sekcji (albo `claude mcp add -e NVD_API_KEY=...`).
+On Windows use `"command": "C:\\path\\to\\cvescout\\.venv\\Scripts\\cvescout.exe"`. `NVD_API_KEY` and `GITHUB_TOKEN`
+can be passed in an `"env"` field of the same section (or with `claude mcp add -e NVD_API_KEY=...`).
 
-**Własny agent (Python):**
+**Your own agent (Python):**
 
 ```python
 from mcp import Client, StdioServerParameters
@@ -326,12 +333,20 @@ async with Client(StdioServerParameters(command=".venv/bin/cvescout", args=["mcp
     print(result.content[0].text)  # JSON
 ```
 
-## Testy
+## Security notes
+
+- CVE descriptions, titles and references are written by third parties. cvescout strips terminal control characters
+  from them, and the agent and MCP instructions tell the model to treat them as data, never as instructions. If you
+  feed `--json` output into your own LLM pipeline, do the same.
+- cvescout only reads public data; the only thing it sends anywhere is the optional `watch` webhook, to the URL you configure.
+- To report a vulnerability in cvescout itself, see [SECURITY.md](SECURITY.md).
+
+## Tests
 
 ```bash
 .venv/bin/pytest
 ```
 
-## Licencja
+## License
 
 [MIT](LICENSE)

@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tomllib
 import urllib.request
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -127,7 +128,11 @@ def run(config_path: Path, dry_run: bool = False) -> dict:
     With dry_run nothing is stored or sent, so the same alerts come back next time.
     """
     config = load_config(config_path)
-    db = _connect(config_path)
+    with closing(_connect(config_path)) as db:
+        return _run(config, db, dry_run)
+
+
+def _run(config: dict, db: sqlite3.Connection, dry_run: bool) -> dict:
     now = sources.now_utc()
 
     last_run = db.execute("SELECT value FROM meta WHERE key = 'last_run'").fetchone()
@@ -244,13 +249,13 @@ def send_webhook(url: str, fmt: str, alerts: list[dict]) -> None:
 
 
 def list_alerts(config_path: Path, limit: int = 50) -> list[dict]:
-    db = _connect(config_path)
-    rows = db.execute(
-        """SELECT cve_id, watch, published, priority, score, notified_priority FROM cves
-           WHERE notified_priority IS NOT NULL ORDER BY published DESC LIMIT ?""",
-        (limit,),
-    )
-    return [dict(r) for r in rows]
+    with closing(_connect(config_path)) as db:
+        rows = db.execute(
+            """SELECT cve_id, watch, published, priority, score, notified_priority FROM cves
+               WHERE notified_priority IS NOT NULL ORDER BY published DESC LIMIT ?""",
+            (limit,),
+        )
+        return [dict(r) for r in rows]
 
 
 def init(config_path: Path) -> bool:
