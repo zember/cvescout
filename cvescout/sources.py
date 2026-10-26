@@ -6,6 +6,7 @@ so results never depend on what a language model remembers.
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import os
@@ -22,6 +23,7 @@ NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EPSS_URL = "https://api.first.org/data/v1/epss"
+EPSS_BULK_URL = "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"
 GHSA_URL = "https://api.github.com/advisories"
 CVELIST_REPO = "CVEProject/cvelistV5"
 CVELIST_RAW_URL = f"https://raw.githubusercontent.com/{CVELIST_REPO}/main/cves"
@@ -682,6 +684,8 @@ def normalize_cvelist(record: dict) -> dict:
             "vendor": a.get("vendor") or a.get("collectionURL"),
             "product": a.get("product") or a.get("packageName"),
             "versions": [_version_range(v) for v in a.get("versions", []) if v.get("status") == "affected"][:5],
+            # What the vendor says about versions not listed: affected / unaffected / unknown
+            "default_status": a.get("defaultStatus"),
         }
         if entry not in affected:
             affected.append(entry)
@@ -850,6 +854,7 @@ def fetch_cvelist_recent(
         "window_end": end.isoformat(),
         "missing_days": sorted(missing),
         "fetched_individually": len(unzipped),
+        "affected_note": AFFECTED_NOTE,
         "published_in_window": in_range,
         "matching": len(items),
         "cves": items[:limit],
@@ -910,9 +915,32 @@ def kev_ids() -> set[str]:
     return {v["cveID"] for v in fetch_kev_catalog().get("vulnerabilities", [])}
 
 
+EPSS_BULK_THRESHOLD = 300  # above this many CVEs one 3 MB file beats a request per 100
+
+
+def _epss_bulk() -> dict[str, tuple[float, float]]:
+    """All current EPSS scores ({id: (epss, percentile)}); EPSS is recomputed daily."""
+
+    def parse(body: bytes) -> dict[str, tuple[float, float]]:
+        scores = {}
+        for line in gzip.decompress(body).decode().splitlines():
+            if line.startswith("CVE-"):
+                cve, epss, percentile = line.split(",")
+                scores[cve] = (float(epss), float(percentile))
+        return scores
+
+    return _get(EPSS_BULK_URL, parse, ttl=6 * 3600)
+
+
 def fetch_epss(cve_ids: list[str]) -> dict[str, dict]:
     """EPSS exploitation probability per CVE ({id: {"epss": float, "percentile": float}})."""
     scores: dict[str, dict] = {}
+    if len(cve_ids) > EPSS_BULK_THRESHOLD:
+        bulk = _epss_bulk()
+        for cve in cve_ids:
+            if cve in bulk:
+                scores[cve] = {"epss": bulk[cve][0], "percentile": bulk[cve][1]}
+        return scores
     for i in range(0, len(cve_ids), 100):
         chunk = ",".join(cve_ids[i : i + 100])
         data = _get_json(f"{EPSS_URL}?{urllib.parse.urlencode({'cve': chunk})}")
@@ -946,3 +974,74 @@ def enrich(cves: list[dict], key: str = "id") -> list[dict]:
         if c["in_cisa_kev"]:
             c["exploit"] = "active"
     return cves
+
+
+# EPSS at or above this (10% chance of exploitation within 30 days) weighs like a public PoC
+RISK_EPSS_HIGH = 0.1
+PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def risk(item: dict) -> dict:
+    """cvescout's patch-priority heuristic for one enriched item (CVE or GHSA advisory).
+
+    score 0-100 = 50% threat (active exploitation 1.0, public PoC 0.7, EPSS
+    scaled so that RISK_EPSS_HIGH counts as 0.7) + 40% CVSS + 10% likely RCE.
+    Threat weighs most because most CVEs, even critical ones, are never
+    exploited. priority is a label for triage: critical = exploited now,
+    high = exploit likely and impact high, medium = one of the two.
+    """
+    score, exploit, rce = item.get("cvss_score"), item.get("exploit"), bool(item.get("rce"))
+    epss = (item.get("epss") or {}).get("epss")
+    factors = []
+
+    threat = {"active": 1.0, "poc": 0.7}.get(exploit or "", 0.0)
+    if exploit == "active":
+        factors.append("actively exploited (CISA KEV)" if item.get("in_cisa_kev") else "actively exploited")
+    elif exploit == "poc":
+        factors.append("public exploit (PoC)")
+    if epss is None:
+        factors.append("no EPSS yet")
+    else:
+        threat = max(threat, 0.7 * min(1.0, epss / RISK_EPSS_HIGH))
+        factors.append(f"EPSS {epss:.2%}")
+    factors.append(f"CVSS {score}" if score is not None else "no CVSS (counted as 5.0)")
+    if rce:
+        factors.append("likely RCE")
+
+    impact = (score if score is not None else 5.0) / 10
+    likely = exploit == "poc" or (epss or 0) >= RISK_EPSS_HIGH
+    severe = score is None or score >= 7
+    if exploit == "active":
+        priority = "critical"
+    elif (likely and severe) or (rce and (score or 0) >= 9):
+        priority = "high"
+    elif likely or (score or 0) >= 7:
+        priority = "medium"
+    else:
+        priority = "low"
+    return {
+        "score": round(100 * (0.5 * threat + 0.4 * impact + 0.1 * rce)),
+        "priority": priority,
+        "factors": factors,
+    }
+
+
+def add_risk(items: list[dict], key: str = "id", sort: bool = False) -> list[dict]:
+    """Enrich items with EPSS/KEV and add `risk`; with `sort`, highest priority first."""
+    enrich(items, key=key)
+    for i in items:
+        i["risk"] = risk(i)
+    if sort:
+        items.sort(
+            key=lambda i: (PRIORITY_ORDER[i["risk"]["priority"]], i["risk"]["score"], i.get("published") or ""),
+            reverse=True,
+        )
+    return items
+
+
+AFFECTED_NOTE = (
+    "affected lists the versions the vendor (CNA) reported. Vendors usually list only supported "
+    "branches, and some mark every other version unaffected (default_status) without checking it: "
+    "older, end-of-life versions may be vulnerable too and will get no fix. Never call a version "
+    "safe just because it is not listed."
+)

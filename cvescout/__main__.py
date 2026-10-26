@@ -15,7 +15,15 @@ def _exploit_tag(item: dict) -> str:
     return {"active": " EXPLOITED", "poc": " PoC"}.get(item.get("exploit") or "", "")
 
 
+def _risk_tag(item: dict) -> str:
+    r = item.get("risk")
+    return f"{r['score']:>3} {r['priority']:<8} " if r else ""
+
+
 def _feed(args: argparse.Namespace) -> int:
+    by_risk = args.sort == "risk"
+    # Ranking by risk needs every match, not just the newest `limit`
+    fetch_limit = 100_000 if by_risk else args.limit
     if args.since and (args.kev or args.ghsa):
         # KEV and GHSA filter by days; GHSA returns at most the newest 100 per severity
         args.days = (sources.now_utc().date() - date.fromisoformat(args.since)).days
@@ -29,21 +37,22 @@ def _feed(args: argparse.Namespace) -> int:
                 package=args.package,
                 min_severity=args.severity,
                 include_unreviewed=args.unreviewed,
-                limit=args.limit,
+                limit=100 if by_risk else args.limit,
                 min_score=args.min_score,
                 rce=args.rce,
                 match_any=args.any,
                 poc=args.poc,
             )
-            if args.enrich:
-                sources.enrich(data["advisories"], key="cve_id")
+            if args.enrich or by_risk:
+                sources.add_risk(data["advisories"], key="cve_id", sort=by_risk)
+                data["advisories"] = data["advisories"][: args.limit]
         else:
             fetch = sources.fetch_cvelist_recent if args.cvelist else sources.fetch_nvd_recent
             data = fetch(
                 days=args.days,
                 keyword=args.keyword,
                 min_severity=args.severity,
-                limit=args.limit,
+                limit=fetch_limit,
                 min_score=args.min_score,
                 rce=args.rce,
                 match_any=args.any,
@@ -51,8 +60,9 @@ def _feed(args: argparse.Namespace) -> int:
                 cpe=args.cpe,
                 poc=args.poc,
             )
-            if args.enrich:
-                sources.enrich(data["cves"])
+            if args.enrich or by_risk:
+                sources.add_risk(data["cves"], sort=by_risk)
+                data["cves"] = data["cves"][: args.limit]
     except sources.SourceError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -78,7 +88,7 @@ def _feed(args: argparse.Namespace) -> int:
             extra = (" RCE" if a["rce"] else "") + _exploit_tag(a)
             print(
                 f"{a['published'][:16]}  {a['id']:<20} {a['cve_id'] or '-':<18} {score} "
-                f"{(a['severity'] or 'N/A'):<8}{extra}  {pkgs or a['summary'][:80]}"
+                f"{(a['severity'] or 'N/A'):<8} {_risk_tag(a)}{extra.strip():<14} {pkgs or a['summary'][:80]}"
             )
         return 0
 
@@ -96,7 +106,7 @@ def _feed(args: argparse.Namespace) -> int:
         if args.enrich and c.get("epss"):
             extra += f" EPSS={c['epss']['epss']:.3f}"
         desc = c["description"].replace("\n", " ")[:100]
-        print(f"{c['published'][:16]}  {c['id']:<18} {score} {sev:<8}{extra}  {desc}")
+        print(f"{c['published'][:16]}  {c['id']:<18} {score} {sev:<8} {_risk_tag(c)}{extra.strip():<14} {desc}")
     return 0
 
 
@@ -162,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--poc", action="store_true", help="only with a public exploit (PoC) or active exploitation")
     feed.add_argument("--any", action="store_true", help="match ANY of --severity/--min-score/--rce/--poc instead of all")
     feed.add_argument("--limit", type=int, default=30, help="max rows to show (default 30)")
+    feed.add_argument(
+        "--sort", choices=["published", "risk"], default="published",
+        help="newest first (default) or highest patch priority first (adds EPSS/KEV and risk)",
+    )
     source = feed.add_mutually_exclusive_group()
     source.add_argument("--kev", action="store_true", help="CISA Known Exploited Vulnerabilities instead of NVD")
     source.add_argument("--ghsa", action="store_true", help="GitHub Advisory Database instead of NVD")
@@ -172,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--ecosystem", choices=sources.GHSA_ECOSYSTEMS, help="GHSA: package ecosystem")
     feed.add_argument("--package", help="GHSA: package name, e.g. lodash")
     feed.add_argument("--unreviewed", action="store_true", help="GHSA: include unreviewed advisories")
-    feed.add_argument("--enrich", action="store_true", help="add EPSS and KEV status")
+    feed.add_argument("--enrich", action="store_true", help="add EPSS, KEV status and risk score")
     feed.add_argument("--json", action="store_true")
     feed.set_defaults(func=_feed)
 

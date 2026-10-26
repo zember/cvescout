@@ -52,7 +52,8 @@ export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`)
 
 ```bash
 cvescout feed --days 2                               # CVE z ostatnich 48 h, najnowsze pierwsze
-cvescout feed --days 7 --severity CRITICAL --enrich  # krytyczne z tygodnia + EPSS/KEV
+cvescout feed --days 7 --severity CRITICAL --enrich  # krytyczne z tygodnia + EPSS/KEV/ryzyko
+cvescout feed --days 7 --sort risk                   # tydzień, najpilniejsze do załatania pierwsze
 cvescout feed --days 30 --keyword fortinet
 cvescout feed --days 30 --kev                        # dodane do CISA KEV w ostatnim miesiącu
 cvescout feed --days 1 --json
@@ -103,6 +104,39 @@ Kolumna po ocenie pokazuje `RCE`, `PoC` (exploit publiczny) lub `EXPLOITED` (akt
 - `--rce` to heurystyka – traktuj wynik jako „prawdopodobne RCE” i sprawdzaj opis.
 - CVE odrzucone (REJECTED: duplikaty, numery nadane przez pomyłkę, zgłoszenia, które nie okazały się podatnością) są pomijane.
   `get_cve_details` dla pojedynczego CVE nadal pokazuje status odrzucenia.
+
+### Wynik ryzyka: co łatać najpierw
+
+```bash
+cvescout feed --days 7 --sort risk --limit 20                  # tydzień, najpilniejsze pierwsze
+cvescout feed --cvelist --days 3 --sort risk --keyword php
+cvescout feed --ghsa --days 30 --ecosystem npm --sort risk
+```
+
+`--sort risk` dodaje EPSS i KEV, ocenia **wszystkie** pasujące CVE (nie tylko najnowsze `--limit`) i sortuje je wg priorytetu.
+`--enrich` dodaje ten sam wynik bez zmiany kolejności. W `--json` każde CVE ma pole
+`risk: {score, priority, factors}`, a `factors` wyjaśnia ocenę (np. `actively exploited (CISA KEV)`, `EPSS 34.00%`, `CVSS 9.8`).
+
+| Priorytet | Kiedy |
+|---|---|
+| `critical` | aktywnie wykorzystywana (CISA KEV, SSVC „active”, CVSS v4 `E:A`) |
+| `high` | publiczny exploit lub EPSS ≥ 10% przy CVSS ≥ 7 (lub nieznanym), albo prawdopodobne RCE z CVSS ≥ 9 |
+| `medium` | tylko jedno z dwóch: exploit/EPSS ≥ 10% albo CVSS ≥ 7 |
+| `low` | pozostałe |
+
+`score` (0–100) porządkuje CVE w obrębie priorytetu: 50% zagrożenie (wykorzystywana 1.0, PoC 0.7, EPSS przeskalowany tak,
+że 10% liczy się jak PoC) + 40% CVSS + 10% prawdopodobne RCE. Zagrożenie waży najwięcej, bo większość CVE – nawet
+krytycznych – nigdy nie jest wykorzystywana. To heurystyka cvescout, nie oficjalna ocena; świeże CVE nie mają jeszcze EPSS
+(`no EPSS yet`), więc ich wynik opiera się na CVSS i znanych exploitach.
+
+### Wersje podatne podane przez producenta
+
+Pole `affected` (CVE List, `get_cve_details`) pokazuje wersje zgłoszone przez producenta (CNA), a `default_status` –
+co producent mówi o pozostałych wersjach (`affected`, `unaffected`, `unknown` lub brak).
+**Producenci zwykle podają tylko wspierane gałęzie.** Przykład: CVE-2026-109618 w PHP wymienia 8.2–8.5 z
+`default_status: unaffected`, choć starsze, niewspierane wersje (np. 7.x) mogą mieć ten sam błąd – po prostu nikt ich
+nie sprawdzał i nie dostaną poprawki. Brak wersji na liście nie znaczy, że jest bezpieczna; agent i serwer MCP mają to
+w instrukcjach i dostają tę uwagę w polu `affected_note`.
 
 ### Nazwy CPE: `cvescout cpe`
 

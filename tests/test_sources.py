@@ -441,7 +441,9 @@ def test_normalize_cvelist_merges_cna_and_adp():
     assert c["exploit"] == "active" and c["exploit_refs"] == ["https://example.com/poc"]
     assert c["rce"] and c["cwe"] == ["CWE-78"]
     assert c["affected_products"] == ["acme:widget"]
-    assert c["affected"] == [{"vendor": "Acme", "product": "widget", "versions": ["1.0 - <1.4"]}]
+    assert c["affected"] == [
+        {"vendor": "Acme", "product": "widget", "versions": ["1.0 - <1.4"], "default_status": None}
+    ]
 
 
 @pytest.mark.parametrize("cve_id, path", [
@@ -584,3 +586,77 @@ def test_nvd_searches_skip_rejected_cves(monkeypatch):
     sources.fetch_nvd_recent(since="2020-01-01", cpe="haxx:curl")
     sources.fetch_nvd_cve("CVE-2026-1234")  # a direct lookup still shows a rejection
     assert [("noRejected" in q) for q in calls] == [True, True, False]
+
+
+@pytest.mark.parametrize("item, score, priority", [
+    # exploited now beats everything, even with a low CVSS
+    ({"cvss_score": 5.0, "exploit": "active", "in_cisa_kev": True, "epss": {"epss": 0.002}}, 70, "critical"),
+    ({"cvss_score": 9.8, "exploit": "poc", "rce": True, "epss": {"epss": 0.01}}, 84, "high"),
+    # high EPSS alone counts like a PoC
+    ({"cvss_score": 8.0, "epss": {"epss": 0.5}}, 67, "high"),
+    ({"cvss_score": 9.8, "rce": True, "epss": {"epss": 0.0004}}, 49, "high"),
+    ({"cvss_score": 9.8, "epss": {"epss": 0.0004}}, 39, "medium"),
+    ({"cvss_score": 4.3, "exploit": "poc", "epss": {"epss": 0.001}}, 52, "medium"),
+    ({"cvss_score": 4.3, "epss": None}, 17, "low"),
+    ({"cvss_score": None, "exploit": "poc", "epss": None}, 55, "high"),
+])
+def test_risk(item, score, priority):
+    r = sources.risk(item)
+    assert (r["score"], r["priority"]) == (score, priority)
+
+
+def test_risk_factors_explain_the_score():
+    r = sources.risk({"cvss_score": None, "exploit": "active", "in_cisa_kev": True, "rce": True,
+                      "epss": {"epss": 0.99981}})
+    assert r["factors"] == ["actively exploited (CISA KEV)", "EPSS 99.98%", "no CVSS (counted as 5.0)", "likely RCE"]
+
+
+def test_add_risk_sorts_by_priority_then_score(monkeypatch):
+    monkeypatch.setattr(sources, "enrich", lambda items, key="id": items)
+    items = [
+        {"id": "CVE-2026-1", "published": "2026-10-26", "cvss_score": 10.0, "epss": {"epss": 0.001}},
+        {"id": "CVE-2026-2", "published": "2026-10-20", "cvss_score": 6.5, "exploit": "active", "epss": None},
+        {"id": "CVE-2026-3", "published": "2026-10-25", "cvss_score": 8.1, "exploit": "poc", "epss": None},
+    ]
+    ranked = [i["id"] for i in sources.add_risk(items, sort=True)]
+    assert ranked == ["CVE-2026-2", "CVE-2026-3", "CVE-2026-1"]
+
+
+def test_epss_uses_bulk_file_for_many_cves(monkeypatch):
+    import gzip
+
+    body = gzip.compress(b"#model_version:v1,score_date:2026-10-26\ncve,epss,percentile\nCVE-2026-1000,0.5,0.99\n")
+    urls = []
+
+    def fake_get(url, parse, headers=None, retries=3, retry_on=(), ttl=0):
+        urls.append(url)
+        return parse(body)
+
+    monkeypatch.setattr(sources, "_get", fake_get)
+    ids = [f"CVE-2026-{n}" for n in range(1000, 1000 + sources.EPSS_BULK_THRESHOLD + 1)]
+    scores = sources.fetch_epss(ids)
+    assert urls == [sources.EPSS_BULK_URL]
+    assert scores == {"CVE-2026-1000": {"epss": 0.5, "percentile": 0.99}}
+
+
+def test_feed_sort_risk_ranks_all_matches_before_limit(monkeypatch, capsys):
+    from cvescout.__main__ import main
+
+    seen = {}
+
+    def fake_fetch(**kwargs):
+        seen.update(kwargs)
+        return {"window_start": "2026-10-19T12:00", "window_end": "2026-10-26T12:00",
+                "published_in_window": 2, "matching": 2, "cves": [
+                    {"id": "CVE-2026-1", "published": "2026-10-26", "cvss_score": 9.0, "severity": "CRITICAL",
+                     "rce": False, "exploit": None, "epss": {"epss": 0.001}, "description": "newest"},
+                    {"id": "CVE-2026-2", "published": "2026-10-20", "cvss_score": 7.0, "severity": "HIGH",
+                     "rce": False, "exploit": "active", "epss": {"epss": 0.3}, "description": "exploited"},
+                ]}
+
+    monkeypatch.setattr(sources, "fetch_nvd_recent", fake_fetch)
+    monkeypatch.setattr(sources, "enrich", lambda items, key="id": items)
+    assert main(["feed", "--days", "7", "--sort", "risk", "--limit", "1"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert seen["limit"] > 1
+    assert len(out) == 2 and "CVE-2026-2" in out[1] and "critical" in out[1]

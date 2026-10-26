@@ -45,10 +45,12 @@ def search_recent_cves(
     since: str | None = None,
     cpes: list[str] | None = None,
     source: Literal["nvd", "cvelist"] = "nvd",
+    sort_by: Literal["published", "risk"] = "published",
 ) -> str:
-    """Search for CVEs published in the last N days (or since a date), newest first, enriched with EPSS exploit probability and CISA KEV membership.
+    """Search for CVEs published in the last N days (or since a date), enriched with EPSS exploit probability, CISA KEV membership and a risk score (patch priority).
 
     Args:
+        sort_by: "published" (newest first) or "risk" (highest patch priority first, ranked over all matches). Use "risk" for "what should I patch first", "most dangerous", "top N".
         source: "nvd" (default; NVD API, any date range, CPE filters cover NVD-analyzed CVEs) or "cvelist" (CVEProject CVE List: last 30 days only, no rate limit, CVEs appear about an hour before NVD, includes vendor-supplied affected versions; keywords also match vendor and product names; CPE filters only match where the vendor supplied CPEs). Use "cvelist" for the last hours or days, or when NVD is unavailable or slow.
         days: Look-back window in days. Use small windows (1-7) for "latest". Ignored when `since` is set.
         keywords: Optional free-text filters, OR-ed (one search each), e.g. ["openssl"] or ["node.js", "curl"]. Matches anywhere in the description, so it is broad.
@@ -67,17 +69,19 @@ def search_recent_cves(
             days=days,
             keyword=keywords,
             min_severity=min_severity,
-            limit=max(1, min(limit, 100)),
             min_score=min_score,
             rce=rce_only,
             match_any=match_any,
             poc=poc_only,
             since=since,
             cpe=cpes,
+            limit=100_000 if sort_by == "risk" else max(1, min(limit, 100)),
         )
-        sources.enrich(data["cves"])
     except sources.SourceError as e:
         return _error(e)
+    sources.add_risk(data["cves"], sort=sort_by == "risk")
+    data["cves"] = data["cves"][: max(1, min(limit, 100))]
+    data["sorted_by"] = sort_by
     for c in data["cves"]:
         c["description"] = c["description"][:600]
     return _result(data, [c["id"] for c in data["cves"]])
@@ -123,7 +127,9 @@ def get_cve_details(cve_id: str) -> str:
         cve["affected"] = cvelist["affected"]
     elif cvelist_error:
         cve["affected"] = f"unavailable: {cvelist_error}"
-    sources.enrich([cve])
+    if isinstance(cve.get("affected"), list):
+        cve["affected_note"] = sources.AFFECTED_NOTE
+    sources.add_risk([cve])
     try:
         cve["github_advisories"] = sources.fetch_ghsa_for_cve(cve["id"])
     except sources.SourceError as e:
@@ -146,6 +152,7 @@ def search_github_advisories(
     rce_only: bool = False,
     match_any: bool = False,
     poc_only: bool = False,
+    sort_by: Literal["published", "risk"] = "published",
 ) -> str:
     """Search the GitHub Advisory Database for security advisories published in the last N days, newest first. Best source for open-source dependencies: each reviewed advisory names the package, vulnerable version range and first patched version. Some advisories have no CVE ID (only a GHSA ID).
 
@@ -160,6 +167,7 @@ def search_github_advisories(
         rce_only: Only remote code execution (code/command injection reachable over the network; heuristic on CWE, description and CVSS vector).
         match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
         poc_only: Only items with a known public exploit or active exploitation (NVD "Exploit" references, CISA SSVC, CVSS v4 exploit maturity, CISA KEV).
+        sort_by: "published" (newest first) or "risk" (highest patch priority first, over the newest 100 advisories).
     """
     try:
         data = sources.fetch_ghsa_recent(
@@ -168,15 +176,17 @@ def search_github_advisories(
             package=package,
             min_severity=min_severity,
             include_unreviewed=include_unreviewed,
-            limit=max(1, min(limit, 100)),
+            limit=100 if sort_by == "risk" else max(1, min(limit, 100)),
             min_score=min_score,
             rce=rce_only,
             match_any=match_any,
             poc=poc_only,
         )
-        sources.enrich(data["advisories"], key="cve_id")
     except sources.SourceError as e:
         return _error(e)
+    sources.add_risk(data["advisories"], key="cve_id", sort=sort_by == "risk")
+    data["advisories"] = data["advisories"][: max(1, min(limit, 100))]
+    data["sorted_by"] = sort_by
     return _result(data, [a["cve_id"] for a in data["advisories"] if a["cve_id"]])
 
 
