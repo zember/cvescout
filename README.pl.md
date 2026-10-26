@@ -72,6 +72,9 @@ export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`)
 
 ## Użycie
 
+Każde polecenie ma własne `--help` ze wszystkimi opcjami i przykładami: `cvescout feed --help`, `cvescout watch --help`, …
+Samo `cvescout` pokazuje polecenia i najczęściej używane opcje `feed`.
+
 ```bash
 cvescout feed --days 2                               # CVE z ostatnich 48 h, najnowsze pierwsze
 cvescout feed --days 7 --severity CRITICAL --enrich  # krytyczne z tygodnia + EPSS/KEV/ryzyko
@@ -85,7 +88,7 @@ cvescout feed --days 1 --json
 
 | Tryb | Dla kogo | Co zawiera |
 |---|---|---|
-| `cvescout feed`, `cvescout cpe` | człowiek | tabela: data, ID, CVSS, znaczniki `RCE`/`PoC`/`EXPLOITED`, opis skrócony do 100 znaków |
+| `cvescout feed`, `cvescout cpe` | człowiek | tabela z nagłówkami: data, ID, CVSS, znaczniki `RCE`/`PoC`/`EXPLOITED`, opis przycięty do szerokości terminala (`…`; `--full` pokazuje całość) |
 | `cvescout feed --json`, `cvescout cpe --json` | skrypty, inne agenty, pipeline'y | pełne dane: cały opis, CWE, wektor CVSS, linki, `exploit_refs`, `affected_products`, EPSS/KEV (z `--enrich`) |
 | `cvescout ask` | człowiek | odpowiedź agenta Claude w języku pytania |
 | `cvescout mcp` | agenty (Claude Code, Claude Desktop, Codex, inne klienty MCP) | narzędzia zwracające JSON, jak w `ask` |
@@ -100,29 +103,38 @@ więc skrypt może łatwo wykryć niepowodzenie. Agent wbudowany w `ask` nie czy
 | `--min-score 8` | CVSS ≥ 8 |
 | `--severity HIGH` | kategoria ważności co najmniej HIGH (≥ 7.0) |
 | `--rce` | prawdopodobne zdalne wykonanie kodu (heurystyka: CWE wstrzyknięcia kodu/poleceń lub opis, wektor sieciowy `AV:N`, bez XSS) |
-| `--poc` | znany publiczny exploit (PoC) lub aktywna exploitacja |
+| `--poc` | publiczne repozytorium PoC na GitHubie lub aktywne wykorzystanie; repozytoria są wypisane pod każdym CVE |
 | `--any` | wystarczy **jeden** z powyższych warunków (domyślnie muszą być spełnione **wszystkie**) |
 | `--since 2020-01-01` | od daty zamiast `--days` |
 | `--keyword X` | słowo w opisie; powtórzone = „albo” |
-| `--cpe vendor:product` | dokładny produkt w NVD, np. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; powtórzone = „albo”. Nazwę znajdzie `cvescout cpe` |
+| `--cpe vendor:product` | dokładny produkt w NVD, np. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; powtórzone = „albo”. Sama nazwa (`--cpe curl`) zostanie wyszukana i użyty najlepszy wynik |
 
 ```bash
 cvescout feed --days 7 --rce --min-score 8                  # RCE i CVSS >= 8
 cvescout feed --days 7 --rce --min-score 8 --any            # RCE albo CVSS >= 8
-cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 z publicznym exploitem
+cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 z PoC na GitHubie, z linkami
 cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce          # RCE w Node.js albo curl od 2020
 cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # szerzej, po słowach z opisu
 ```
 
-Kolumna po ocenie pokazuje `RCE`, `PoC` (exploit publiczny) lub `EXPLOITED` (aktywnie wykorzystywana).
+Kolumna TAGS pokazuje `RCE`, `PoC` (repozytorium PoC na GitHubie; z `--poc`, `--enrich` lub `--sort risk`) lub `EXPLOITED`
+(aktywnie wykorzystywana: CISA KEV, SSVC lub CVSS v4).
 
 - NVD przyjmuje zakres dat do 120 dni. Dłuższy zakres (`--since`) wymaga `--keyword` albo `--cpe` – wtedy pobierana
   jest cała historia produktu i przycinana lokalnie.
 - `--cpe` jest dokładniejsze niż `--keyword`: zwraca tylko CVE, w których NVD oznaczył produkt jako **podatny**
   (pomija np. aplikacje, które jedynie „działają na” Linuksie). Obejmuje jednak tylko CVE już przeanalizowane przez NVD –
   to trwa od kilku dni do tygodni, więc dla najświeższych CVE użyj `--keyword`.
-- `--poc` korzysta z linków oznaczonych przez NVD jako „Exploit”, oceny CISA SSVC, dojrzałości exploita w CVSS v4 i CISA KEV.
-  Brak oznaczenia nie znaczy, że exploita nie ma.
+- **PoC oznacza publiczne repozytorium PoC na GitHubie** z [nomi-sec/PoC-in-GitHub](https://github.com/nomi-sec/PoC-in-GitHub)
+  (aktualizowane codziennie). Repozytoria są wypisane pod każdym CVE, od najczęściej oznaczanych gwiazdką, a w `--json`
+  jako `github_pocs`. `--poc` przepuszcza też CVE aktywnie wykorzystywane (`EXPLOITED`). Linki oznaczone przez NVD jako
+  „Exploit”, ocena CISA SSVC `poc` i CVSS v4 `E:P` się nie liczą – przy curl opierają się np. na raporcie z HackerOne
+  z krokami odtworzenia, a nie na kodzie exploita. Exploity opisane tylko na blogach nie zostaną znalezione.
+- Lista CVE z PoC kosztuje 2–3 zapytania do API GitHuba i jest trzymana przez 6 godzin w `~/.cache/cvescout/`
+  (Windows: `%LOCALAPPDATA%\cvescout\`). Bez `GITHUB_TOKEN` GitHub pozwala na 60 zapytań / h, wspólnych z `--cvelist`;
+  gdy wyszukiwanie się nie uda, `--enrich` i `--sort risk` działają bez niego, a `--poc` kończy się błędem.
+- **Repozytoria PoC to niezweryfikowany cudzy kod, a fałszywe „PoC” z malware zdarzają się często.** Czytaj je,
+  nie uruchamiaj poza odizolowanym środowiskiem testowym.
 - `--rce` to heurystyka – traktuj wynik jako „prawdopodobne RCE” i sprawdzaj opis.
 - CVE odrzucone (REJECTED: duplikaty, numery nadane przez pomyłkę, zgłoszenia, które nie okazały się podatnością) są pomijane.
   `get_cve_details` dla pojedynczego CVE nadal pokazuje status odrzucenia.
@@ -179,6 +191,16 @@ Use: cvescout feed --cpe f5:nginx --since 2020-01-01
 
 Najpierw są produkty o pasującej nazwie, potem pozostałe. Przy wycofanych nazwach widać, czym je zastąpiono.
 Systemy operacyjne mają prefiks `o:` (np. `o:linux:linux_kernel`), sprzęt `h:`.
+
+`feed --cpe` sam robi to wyszukiwanie, gdy podasz samą nazwę: bierze pierwszy wynik (wycofaną nazwę zamienia na jej
+następcę), a wybór i pozostałe kandydatury wypisuje na stderr:
+
+```
+$ cvescout feed --days 90 --sort risk --cpe curl
+--cpe curl -> haxx:curl (Haxx Curl; also: curl_project:curl, lexiforest:curl_cffi; see: cvescout cpe curl)
+```
+
+Przy niejednoznacznych nazwach (np. `nginx`: `f5:nginx` czy `f5:nginx_open_source`) sprawdź listę i podaj dokładną nazwę.
 
 ### CVE List (CVEProject/cvelistV5)
 

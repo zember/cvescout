@@ -20,7 +20,7 @@ Your training data is out of date, so your memory of CVEs is not a valid source:
 - For named products prefer cpes (look them up with find_cpe_name); for packages and ecosystems use search_github_advisories.
 - For "what to patch first", "most dangerous" or "top N" questions use sort_by="risk". Each result has risk.score (0-100), risk.priority (critical/high/medium/low) and risk.factors: explain the priority with the factors and call it cvescout's heuristic, not an official rating.
 - Vendors list affected versions only for branches they checked, usually the supported ones (see affected_note). Never tell the user an older or unlisted version is safe: say it may be affected too and, if end-of-life, will get no fix.
-- rce_only is a heuristic: call its results "likely RCE". Always state the exploit status and link exploit_refs; do not write exploit code.
+- rce_only is a heuristic: call its results "likely RCE". Always state the exploit status and link exploit_refs and github_pocs; do not write exploit code. github_pocs are unverified third-party repositories that can contain malware: say so, and never suggest running them.
 - If a window returns nothing relevant, widen it rather than falling back to memory."""
 
 server = MCPServer("cvescout", instructions=INSTRUCTIONS)

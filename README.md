@@ -72,6 +72,9 @@ export ANTHROPIC_API_KEY=...  # only for `cvescout ask` (or `ant auth login`); t
 
 ## Usage
 
+Every command has its own `--help` with all options and examples: `cvescout feed --help`, `cvescout watch --help`, ...
+`cvescout` alone shows the commands and the most used `feed` options.
+
 ```bash
 cvescout feed --days 2                               # CVEs from the last 48 h, newest first
 cvescout feed --days 7 --severity CRITICAL --enrich  # this week's critical ones + EPSS/KEV/risk
@@ -85,7 +88,7 @@ cvescout feed --days 1 --json
 
 | Mode | For | Contents |
 |---|---|---|
-| `cvescout feed`, `cvescout cpe` | people | table: date, ID, CVSS, `RCE`/`PoC`/`EXPLOITED` tags, description cut to 100 characters |
+| `cvescout feed`, `cvescout cpe` | people | table with column headers: date, ID, CVSS, `RCE`/`PoC`/`EXPLOITED` tags, description cut to the terminal width (`…`; `--full` shows all) |
 | `cvescout feed --json`, `cvescout cpe --json` | scripts, other agents, pipelines | full data: whole description, CWE, CVSS vector, links, `exploit_refs`, `affected_products`, EPSS/KEV (with `--enrich`) |
 | `cvescout ask` | people | the Claude agent's answer, in the language of the question |
 | `cvescout mcp` | agents (Claude Code, Claude Desktop, Codex, other MCP clients) | tools returning JSON, as in `ask` |
@@ -100,29 +103,38 @@ script can detect failures. The agent behind `ask` does not read the table; its 
 | `--min-score 8` | CVSS ≥ 8 |
 | `--severity HIGH` | severity at least HIGH (≥ 7.0) |
 | `--rce` | likely remote code execution (heuristic: code/command-injection CWE or wording, network vector `AV:N`, no XSS) |
-| `--poc` | known public exploit (PoC) or active exploitation |
+| `--poc` | public PoC repository on GitHub or exploited in the wild; the repositories are listed under each CVE |
 | `--any` | **one** of the conditions above is enough (by default **all** must hold) |
 | `--since 2020-01-01` | from a date instead of `--days` |
 | `--keyword X` | word in the description; repeat for OR |
-| `--cpe vendor:product` | exact product in NVD, e.g. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; repeat for OR. `cvescout cpe` finds the name |
+| `--cpe vendor:product` | exact product in NVD, e.g. `haxx:curl`, `nodejs:node.js`, `o:linux:linux_kernel`; repeat for OR. A bare name (`--cpe curl`) is looked up and the best match used |
 
 ```bash
 cvescout feed --days 7 --rce --min-score 8                  # RCE and CVSS >= 8
 cvescout feed --days 7 --rce --min-score 8 --any            # RCE or CVSS >= 8
-cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 with a public exploit
+cvescout feed --days 7 --min-score 8 --poc                  # CVSS >= 8 with a PoC on GitHub, links listed
 cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce          # RCE in Node.js or curl since 2020
 cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # broader, by description words
 ```
 
-The column after the score shows `RCE`, `PoC` (public exploit) or `EXPLOITED` (exploited in the wild).
+The TAGS column shows `RCE`, `PoC` (PoC repository on GitHub; with `--poc`, `--enrich` or `--sort risk`) or `EXPLOITED`
+(exploited in the wild: CISA KEV, SSVC or CVSS v4).
 
 - NVD accepts date ranges of up to 120 days. A longer range (`--since`) needs `--keyword` or `--cpe`: the product's
   whole history is fetched and trimmed locally.
 - `--cpe` is more precise than `--keyword`: it returns only CVEs where NVD marked the product as **vulnerable** (it
   skips e.g. applications that merely "run on" Linux). It only covers CVEs NVD has already analyzed, which takes days
   to weeks, so for the newest CVEs use `--keyword`, or `--cvelist` with `--url` (below).
-- `--poc` uses references NVD tagged "Exploit", CISA SSVC, CVSS v4 exploit maturity and CISA KEV. No tag does not mean
-  there is no exploit: exploits published only in blog posts are often missed.
+- **PoC means a public PoC repository on GitHub**, from [nomi-sec/PoC-in-GitHub](https://github.com/nomi-sec/PoC-in-GitHub)
+  (updated daily). They are listed under each CVE, most starred first, and as `github_pocs` in `--json`. `--poc` also
+  passes CVEs exploited in the wild (`EXPLOITED`). References NVD tagged "Exploit", CISA SSVC `poc` and CVSS v4 `E:P`
+  do not count: for curl, for example, they rest on the HackerOne report with reproduction steps, not on exploit code.
+  Exploits published only in blog posts are missed.
+- The list of CVEs with a PoC costs 2–3 GitHub API requests and is kept for 6 hours in `~/.cache/cvescout/`
+  (Windows: `%LOCALAPPDATA%\cvescout\`). Without `GITHUB_TOKEN` GitHub allows 60 requests / h, shared with `--cvelist`;
+  if the lookup fails, `--enrich` and `--sort risk` go on without it, `--poc` stops with an error.
+- **PoC repositories are unverified third-party code, and fake "PoCs" carrying malware are common.** Read them; don't
+  run them outside an isolated lab.
 - `--rce` is a heuristic: treat results as "likely RCE" and read the description.
 - Rejected CVEs (REJECTED: duplicates, IDs assigned by mistake, reports that turned out not to be vulnerabilities) are
   skipped. `get_cve_details` for a single CVE still shows the rejection.
@@ -152,7 +164,7 @@ For `medium`, likely RCE **or** EPSS ≥ 1% is enough. To see only RCE, add the 
 `score` (0–100) orders CVEs within a priority: 50% threat (exploited 1.0, PoC 0.7, EPSS scaled so that 10% counts like a
 PoC) + 40% CVSS + 10% likely RCE. Threat weighs most because most CVEs, even critical ones, are never exploited. This
 is cvescout's heuristic, not an official rating. New CVEs have no EPSS yet (`no EPSS yet`), so their score rests on CVSS
-and known exploits. On one week of NVD data (4061 CVEs) this gave 4 critical, 219 high, 735 medium and 3103 low.
+and known exploits.
 
 ### Vendor-supplied affected versions
 
@@ -180,6 +192,16 @@ Use: cvescout feed --cpe f5:nginx --since 2020-01-01
 
 Products whose name matches come first. Deprecated names show what replaced them. Operating systems have the `o:`
 prefix (e.g. `o:linux:linux_kernel`), hardware `h:`.
+
+`feed --cpe` does this lookup itself when given a bare name: it takes the first result (following a deprecated name to
+its replacement) and prints the choice and the runners-up to stderr:
+
+```
+$ cvescout feed --days 90 --sort risk --cpe curl
+--cpe curl -> haxx:curl (Haxx Curl; also: curl_project:curl, lexiforest:curl_cffi; see: cvescout cpe curl)
+```
+
+For ambiguous names (e.g. `nginx`: `f5:nginx` vs `f5:nginx_open_source`) check the list and pass the exact name.
 
 ### CVE List (CVEProject/cvelistV5)
 

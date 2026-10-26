@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import textwrap
 from datetime import date
 
 from . import sources
@@ -15,9 +17,63 @@ def _exploit_tag(item: dict) -> str:
     return {"active": " EXPLOITED", "poc": " PoC"}.get(item.get("exploit") or "", "")
 
 
+POC_WARNING = "PoC repositories are unverified third-party code and some are malware: read them, don't run them."
+
+
+def _print_pocs(item: dict) -> None:
+    for repo in item.get("github_pocs") or []:
+        print(f"{INDENT}PoC: {repo['url']}  ({repo['stars']} stars, updated {repo['updated']})")
+
+
+INDENT = " " * 20
+
+
+def _print_row(row: str, text: str, full: bool) -> None:
+    """Print `row` followed by `text`: cut to the terminal width with an ellipsis, or with
+    `full` the whole text wrapped under the row. Piped output is never cut."""
+    text = " ".join(text.split())
+    if full:
+        print(row.rstrip())
+        width = max(60, shutil.get_terminal_size((120, 24)).columns)
+        print(textwrap.fill(text, width, initial_indent=INDENT, subsequent_indent=INDENT))
+        return
+    if sys.stdout.isatty():
+        room = max(40, shutil.get_terminal_size().columns - len(row))
+        if len(text) > room:
+            text = text[: room - 1].rstrip() + "…"
+    print(row + text)
+
+
+def _header(columns: str, items: list[dict]) -> None:
+    """Column names over a table; RISK only when the rows carry a risk score (--sort risk, --enrich)."""
+    risk = f"{'RISK':<13}" if any(i.get("risk") for i in items) else ""
+    if items:
+        print(columns.format(risk=risk))
+
+
 def _risk_tag(item: dict) -> str:
     r = item.get("risk")
     return f"{r['score']:>3} {r['priority']:<8} " if r else ""
+
+
+def _resolve_cpe(value: str) -> str:
+    """--cpe value -> vendor:product. A bare product name ("curl") would become a vendor-only
+    pattern that silently matches nothing, so look it up as `cvescout cpe` does and take the best match."""
+    if value.startswith("cpe:") or ":" in value:
+        return value
+    products = sources.find_cpe(value, limit=4)["products"]
+    if not products:
+        raise sources.SourceError(f"no CPE product found for {value!r}; try --keyword {value}")
+    best = products[0]
+    chosen = best["replaced_by"] or best["cpe"]
+    others = ", ".join(p["cpe"] for p in products[1:] if chosen not in (p["cpe"], p["replaced_by"]))
+    print(
+        f"--cpe {value} -> {chosen} ({best['title']}"
+        + (f"; also: {others}" if others else "")
+        + f"; see: cvescout cpe {value})",
+        file=sys.stderr,
+    )
+    return chosen
 
 
 def _feed(args: argparse.Namespace) -> int:
@@ -31,6 +87,8 @@ def _feed(args: argparse.Namespace) -> int:
         # KEV and GHSA filter by days; GHSA returns at most the newest 100 per severity
         args.days = (sources.now_utc().date() - date.fromisoformat(args.since)).days
     try:
+        if args.cpe:
+            args.cpe = [_resolve_cpe(c) for c in args.cpe]
         if args.kev:
             data = sources.fetch_kev_recent(days=args.days, limit=args.limit)
         elif args.ghsa:
@@ -49,6 +107,7 @@ def _feed(args: argparse.Namespace) -> int:
             if args.enrich or by_risk:
                 sources.add_risk(data["advisories"], key="cve_id", sort=by_risk)
                 data["advisories"] = data["advisories"][: args.limit]
+                data["returned"] = len(data["advisories"])
         else:
             fetch = sources.fetch_cvelist_recent if args.cvelist else sources.fetch_nvd_recent
             data = fetch(
@@ -83,6 +142,11 @@ def _feed(args: argparse.Namespace) -> int:
 
     if args.ghsa:
         print(f"GitHub Advisory Database, published since {data['published_since']}, newest {data['returned']}:")
+        _header(
+            f"{'PUBLISHED (UTC)':<16}  {'GHSA':<20} {'CVE':<18} {'CVSS':>4} {'SEVERITY':<8} {{risk}}{'TAGS':<14} "
+            "PACKAGE VULNERABLE -> FIXED",
+            data["advisories"],
+        )
         for a in data["advisories"]:
             score = f"{a['cvss_score']:>4}" if a["cvss_score"] is not None else "   -"
             pkgs = ", ".join(
@@ -90,10 +154,17 @@ def _feed(args: argparse.Namespace) -> int:
                 for p in a["packages"][:2]
             )
             extra = (" RCE" if a["rce"] else "") + _exploit_tag(a)
-            print(
+            row = (
                 f"{a['published'][:16]}  {a['id']:<20} {a['cve_id'] or '-':<18} {score} "
-                f"{(a['severity'] or 'N/A'):<8} {_risk_tag(a)}{extra.strip():<14} {pkgs or a['summary'][:80]}"
+                f"{(a['severity'] or 'N/A'):<8} {_risk_tag(a)}{extra.strip():<14} "
             )
+            if args.full:
+                _print_row(row + pkgs, a["summary"], full=True)
+            else:
+                _print_row(row, pkgs or a["summary"], full=False)
+            _print_pocs(a)
+        if any(a.get("github_pocs") for a in data["advisories"]):
+            print(POC_WARNING)
         return 0
 
     name = f"CVE List (data as of {data['data_as_of']})" if args.cvelist else "NVD"
@@ -103,14 +174,34 @@ def _feed(args: argparse.Namespace) -> int:
     )
     if data.get("missing_days"):
         print(f"warning: no CVE List file for {', '.join(data['missing_days'])}", file=sys.stderr)
+    if data["published_in_window"] and not data["matching"]:
+        used = [
+            name for name, on in [
+                (f"--severity {args.severity}", args.severity), (f"--min-score {args.min_score}", args.min_score is not None),
+                ("--rce", args.rce), ("--poc", args.poc),
+            ] if on
+        ]
+        why = (
+            "--poc: none has a known public exploit (NVD 'Exploit' links alone don't count)"
+            if used == ["--poc"] else f"{' '.join(used)}{' (with --any)' if args.any else ''}"
+        )
+        them = "it" if len(used) == 1 else "them"
+        print(f"{data['published_in_window']} found, but all were filtered out by {why}; run without {them} to see them")
+    _header(
+        f"{'PUBLISHED (UTC)':<16}  {'CVE':<18} {'CVSS':>4} {'SEVERITY':<8} {{risk}}{'TAGS':<14} DESCRIPTION",
+        data["cves"],
+    )
     for c in data["cves"]:
         score = f"{c['cvss_score']:>4}" if c["cvss_score"] is not None else "   -"
         sev = (c["severity"] or "N/A")[:8]
         extra = (" RCE" if c["rce"] else "") + _exploit_tag(c)
         if args.enrich and c.get("epss"):
             extra += f" EPSS={c['epss']['epss']:.3f}"
-        desc = c["description"].replace("\n", " ")[:100]
-        print(f"{c['published'][:16]}  {c['id']:<18} {score} {sev:<8} {_risk_tag(c)}{extra.strip():<14} {desc}")
+        row = f"{c['published'][:16]}  {c['id']:<18} {score} {sev:<8} {_risk_tag(c)}{extra.strip():<14} "
+        _print_row(row, c["description"], args.full)
+        _print_pocs(c)
+    if any(c.get("github_pocs") for c in data["cves"]):
+        print(POC_WARNING)
     return 0
 
 
@@ -196,17 +287,96 @@ def _mcp(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="cvescout", description="Find the latest CVEs from live sources.")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+EXAMPLES = """\
+examples:
+  cvescout feed --days 2                      CVEs from the last 48 h, newest first
+  cvescout feed --days 7 --sort risk          this week, most urgent to patch first
+  cvescout feed --days 30 --cpe curl          CVEs in curl from the last month (finds haxx:curl)
+  cvescout cpe curl                           list matching product names, if the guess is wrong
+  cvescout feed --days 30 --poc               with a PoC repository on GitHub, links listed
+  cvescout feed --days 1 --json               full data as JSON, for scripts
+  cvescout ask "Which critical CVEs were published in the last 3 days?"
+  cvescout watch init                         set up alerts for your products
 
-    feed = sub.add_parser("feed", help="list recently published CVEs (no LLM)")
+feed options (all of them with descriptions: cvescout feed --help):
+  time        --days N, --since YYYY-MM-DD
+  product     --cpe NAME, --keyword WORD, --url TEXT (with --cvelist)
+  filters     --severity LEVEL, --min-score N, --rce, --poc, --any
+  source      NVD by default, or --cvelist, --ghsa (--ecosystem, --package), --kev
+  output      --sort risk, --enrich, --limit N, --full, --json
+
+Each command has its own options and examples: cvescout feed --help, cvescout watch --help, ...
+In Codex or Claude Code, register `cvescout mcp` as an MCP server and ask there (see cvescout mcp --help)."""
+
+FEED_EXAMPLES = """\
+examples:
+  cvescout feed --days 2                               CVEs from the last 48 h, newest first
+  cvescout feed --days 7 --severity CRITICAL --enrich  this week's critical ones + EPSS/KEV/risk
+  cvescout feed --days 7 --sort risk                   this week, most urgent to patch first
+  cvescout feed --days 7 --rce --min-score 8           likely RCE and CVSS >= 8
+  cvescout feed --days 30 --poc --sort risk            with a PoC on GitHub, links listed
+  cvescout feed --days 30 --keyword fortinet           word in the description
+  cvescout feed --days 30 --kev                        added to CISA KEV in the last month
+  cvescout feed --days 90 --sort risk --cpe curl      product looked up by name
+  cvescout feed --since 2020-01-01 --cpe haxx:curl --rce
+  cvescout feed --ghsa --days 7 --ecosystem npm --severity HIGH
+  cvescout feed --cvelist --days 1                     newest, about an hour ahead of NVD
+  cvescout feed --days 7 --cpe curl --full             whole descriptions, not cut
+  cvescout feed --days 1 --json                        full data for scripts"""
+
+CPE_EXAMPLES = """\
+examples:
+  cvescout cpe curl                  -> haxx:curl
+  cvescout cpe apache http server
+  then: cvescout feed --days 30 --cpe haxx:curl
+feed --cpe curl does this lookup itself and takes the first result."""
+
+ASK_EXAMPLES = """\
+examples:
+  cvescout ask "Which critical CVEs were published in the last 3 days?"
+  cvescout ask -v "Show RCE in Node.js or curl since 2020 with a public exploit"
+
+needs ANTHROPIC_API_KEY (or `ant auth login`)"""
+
+WATCH_EXAMPLES = """\
+examples:
+  cvescout watch init             create an example config, then edit it
+  cvescout watch run --dry-run    show alerts without storing or sending them
+  cvescout watch run              check once, store state, send alerts
+  cvescout watch list             past alerts
+  cvescout watch schedule         print a cron / Task Scheduler line (installs nothing)"""
+
+MCP_EXAMPLES = """\
+not run by hand: an agent starts it. Register it once, from the project folder:
+  codex mcp add cvescout -- "$PWD/.venv/bin/cvescout" mcp
+  claude mcp add --scope user cvescout -- "$PWD/.venv/bin/cvescout" mcp
+then ask in Codex / Claude Code, e.g. "which critical CVEs in nginx this week?"
+Claude Desktop and Windows: see the README, section "MCP server"."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """Every error ends with where to find the options, e.g. `see: cvescout feed --help`."""
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {message}\nsee: {self.prog} --help\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    examples = {"formatter_class": argparse.RawDescriptionHelpFormatter}
+    parser = _Parser(
+        prog="cvescout", description="Find the latest CVEs from live sources.", epilog=EXAMPLES, **examples,
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+
+    feed = sub.add_parser("feed", help="list recently published CVEs (no LLM)", epilog=FEED_EXAMPLES, **examples)
     feed.add_argument("--days", type=float, default=2, help="look-back window in days (default 2)")
     feed.add_argument("--since", metavar="YYYY-MM-DD", help="start date instead of --days, e.g. 2020-01-01")
     feed.add_argument("--keyword", action="append", help="NVD keyword filter, e.g. openssl; repeat for OR")
     feed.add_argument(
         "--cpe", action="append", metavar="VENDOR:PRODUCT",
-        help="NVD exact product, e.g. haxx:curl or nodejs:node.js; repeat for OR",
+        help="NVD exact product, e.g. haxx:curl or nodejs:node.js; a bare name (curl) is looked up "
+        "and the best match used; repeat for OR",
     )
     feed.add_argument(
         "--url", action="append", metavar="TEXT",
@@ -215,7 +385,12 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--severity", choices=list(sources.SEVERITY_ORDER), help="minimum severity")
     feed.add_argument("--min-score", type=float, metavar="N", help="minimum CVSS base score, e.g. 8")
     feed.add_argument("--rce", action="store_true", help="only likely remote code execution")
-    feed.add_argument("--poc", action="store_true", help="only with a public exploit (PoC) or active exploitation")
+    feed.add_argument(
+        "--poc", action="store_true",
+        help="only CVEs with a public PoC repository on GitHub (nomi-sec/PoC-in-GitHub), a CISA SSVC / CVSS v4 "
+        "PoC rating, or exploited in the wild (CISA KEV), and list the repositories; unverified code, may be "
+        "malware: read it, don't run it",
+    )
     feed.add_argument("--any", action="store_true", help="match ANY of --severity/--min-score/--rce/--poc instead of all")
     feed.add_argument("--limit", type=int, default=30, help="max rows to show (default 30)")
     feed.add_argument(
@@ -233,21 +408,28 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--package", help="GHSA: package name, e.g. lodash")
     feed.add_argument("--unreviewed", action="store_true", help="GHSA: include unreviewed advisories")
     feed.add_argument("--enrich", action="store_true", help="add EPSS, KEV status and risk score")
-    feed.add_argument("--json", action="store_true")
+    feed.add_argument(
+        "--full", action="store_true",
+        help="whole description under each row (by default it is cut to the terminal width, marked with …)",
+    )
+    feed.add_argument("--json", action="store_true", help="full data as JSON instead of a table, for scripts")
     feed.set_defaults(func=_feed)
 
-    cpe = sub.add_parser("cpe", help="find the CPE vendor:product name to use with feed --cpe")
+    cpe = sub.add_parser("cpe", help="find the CPE vendor:product name to use with feed --cpe",
+                         epilog=CPE_EXAMPLES, **examples)
     cpe.add_argument("query", nargs="+", help="product name, e.g. curl, node.js, apache http server")
     cpe.add_argument("--limit", type=int, default=15, help="max products to show (default 15)")
-    cpe.add_argument("--json", action="store_true")
+    cpe.add_argument("--json", action="store_true", help="full data as JSON instead of a table, for scripts")
     cpe.set_defaults(func=_cpe)
 
-    ask = sub.add_parser("ask", help="ask the built-in agent (needs Claude API credentials; in Codex or Claude Code use `mcp` instead)")
-    ask.add_argument("question", nargs="+")
+    ask = sub.add_parser("ask", help="ask the built-in agent (needs Claude API credentials; in Codex or Claude Code use `mcp` instead)",
+                         epilog=ASK_EXAMPLES, **examples)
+    ask.add_argument("question", nargs="+", help="question in any language; quote it")
     ask.add_argument("-v", "--verbose", action="store_true", help="show tool calls")
     ask.set_defaults(func=_ask)
 
-    watch = sub.add_parser("watch", help="alerts about new CVEs for your products (runs only when you call it)")
+    watch = sub.add_parser("watch", help="alerts about new CVEs for your products (runs only when you call it)",
+                           epilog=WATCH_EXAMPLES, **examples)
     watch.add_argument(
         "action", choices=["init", "run", "list", "schedule"],
         help="init: create the config; run: check once; list: past alerts; schedule: print a cron/Task Scheduler line",
@@ -256,13 +438,21 @@ def main(argv: list[str] | None = None) -> int:
                        "Windows: %%APPDATA%%\\cvescout\\watch.toml)")
     watch.add_argument("--dry-run", action="store_true", help="run: show alerts without storing or sending them")
     watch.add_argument("--limit", type=int, default=50, help="list: max rows (default 50)")
-    watch.add_argument("--json", action="store_true")
+    watch.add_argument("--json", action="store_true", help="full data as JSON instead of a table, for scripts")
     watch.set_defaults(func=_watch)
 
-    mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop, Codex and other agents")
+    mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop, Codex and other agents",
+                         epilog=MCP_EXAMPLES, **examples)
     mcp.set_defaults(func=_mcp)
 
-    args = parser.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        parser.print_help()
+        return 0
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        # Report unknown options against the command they were given to, with its own --help
+        sub.choices[args.cmd].error(f"unrecognized arguments: {' '.join(extra)}")
     return args.func(args)
 
 

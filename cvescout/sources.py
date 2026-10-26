@@ -18,6 +18,7 @@ import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
@@ -29,6 +30,10 @@ CVELIST_REPO = "CVEProject/cvelistV5"
 CVELIST_RAW_URL = f"https://raw.githubusercontent.com/{CVELIST_REPO}/main/cves"
 CVELIST_RELEASES_URL = f"https://github.com/{CVELIST_REPO}/releases/download"
 CVELIST_LATEST_URL = f"https://api.github.com/repos/{CVELIST_REPO}/releases/latest"
+# Public PoC repositories on GitHub, indexed daily as <year>/<CVE-ID>.json
+POC_REPO = "nomi-sec/PoC-in-GitHub"
+POC_TREES_URL = f"https://api.github.com/repos/{POC_REPO}/git/trees"
+POC_RAW_URL = f"https://raw.githubusercontent.com/{POC_REPO}/master"
 CVELIST_DELTALOG_URL = f"{CVELIST_RAW_URL}/deltaLog.json"
 
 NVD_MAX_WINDOW_DAYS = 120  # NVD rejects pubStartDate/pubEndDate ranges longer than this
@@ -168,32 +173,23 @@ EXPLOIT_RANK = {"poc": 1, "active": 2}
 
 
 def exploit_status(cve: dict) -> tuple[str | None, list[str]]:
-    """('active' | 'poc' | None, exploit reference URLs) from NVD data.
+    """('active' | None, exploit reference URLs) from NVD data.
 
-    Signals: CISA SSVC "exploitation" (none/poc/active), CVSS v4 exploit
-    maturity (E:P / E:A) and references NVD tagged "Exploit". KEV membership
-    is added later by mark_kev_exploited/enrich.
+    'active' comes from CISA SSVC exploitation "active" or CVSS v4 E:A. Only
+    a PoC repository on GitHub makes 'poc' (add_github_pocs); KEV membership is
+    added by mark_kev_exploited and enrich. References NVD tagged "Exploit" and
+    SSVC "poc" / CVSS v4 E:P are not enough: for curl, for example, they rest on
+    the HackerOne report with reproduction steps, not on exploit code.
     """
-    refs = [r["url"] for r in cve.get("references", []) if "Exploit" in (r.get("tags") or [])]
-    status = "poc" if refs else None
-
-    def bump(new: str) -> None:
-        nonlocal status
-        if EXPLOIT_RANK[new] > EXPLOIT_RANK.get(status or "", 0):
-            status = new
-
+    # NVD lists some URLs twice
+    refs = list(dict.fromkeys(r["url"] for r in cve.get("references", []) if "Exploit" in (r.get("tags") or [])))
     metrics = cve.get("metrics", {})
-    for m in metrics.get("ssvcV203", []):
-        for option in m.get("ssvcData", {}).get("options", []):
-            if option.get("exploitation") in EXPLOIT_RANK:
-                bump(option["exploitation"])
-    for m in metrics.get("cvssMetricV40", []):
-        vector = m.get("cvssData", {}).get("vectorString") or ""
-        if "/E:A" in vector:
-            bump("active")
-        elif "/E:P" in vector:
-            bump("poc")
-    return status, refs[:5]
+    active = any(
+        option.get("exploitation") == "active"
+        for m in metrics.get("ssvcV203", [])
+        for option in m.get("ssvcData", {}).get("options", [])
+    ) or any("/E:A" in (m.get("cvssData", {}).get("vectorString") or "") for m in metrics.get("cvssMetricV40", []))
+    return ("active" if active else None), refs[:5]
 
 
 def mark_kev_exploited(items: list[dict], key: str = "id") -> None:
@@ -205,6 +201,88 @@ def mark_kev_exploited(items: list[dict], key: str = "id") -> None:
     for i in items:
         if i.get(key) in kev:
             i["exploit"] = "active"
+
+
+# The PoC index costs GitHub API requests (60 / h without a token, shared with --cvelist), so keep it on disk
+POC_INDEX_TTL = 6 * 3600
+
+
+def _cache_dir() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return base / "cvescout"
+
+
+def _poc_index(years: set[str]) -> set[str]:
+    """CVE IDs from the given years that have at least one PoC repository on GitHub."""
+    path = _cache_dir() / "poc-index.json"
+    try:
+        cached = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cached = {}
+    fresh = time.time() - cached.get("fetched", 0) < POC_INDEX_TTL
+    index: dict[str, list[str]] = cached.get("years", {}) if fresh else {}
+    missing = years - index.keys()
+    if missing:
+        try:
+            root = _get_json(f"{POC_TREES_URL}/master", headers=_github_headers(), retry_on=(500, 502, 503, 504))
+            shas = {t["path"]: t["sha"] for t in root.get("tree", []) if t["type"] == "tree"}
+            for year in sorted(missing):
+                tree = (
+                    _get_json(f"{POC_TREES_URL}/{shas[year]}", headers=_github_headers(), retry_on=(500, 502, 503, 504))
+                    if year in shas else {}
+                )
+                index[year] = sorted(t["path"].removesuffix(".json") for t in tree.get("tree", []))
+        except SourceError as e:
+            if "HTTP 403" in str(e) or "HTTP 429" in str(e):
+                raise SourceError(f"{e} (GitHub rate limit; set GITHUB_TOKEN to raise it)") from e
+            raise
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"fetched": cached.get("fetched") if fresh else time.time(), "years": index}))
+        except OSError:
+            pass  # no cache, just more requests next time
+    return {cve_id for year in years for cve_id in index.get(year, [])}
+
+
+def github_pocs(cve_id: str, limit: int = 5) -> list[dict]:
+    """Public PoC repositories for one CVE, most starred first. Unverified third-party code."""
+    try:
+        repos = _get_json(f"{POC_RAW_URL}/{cve_id.split('-')[1]}/{cve_id}.json", retries=1, retry_on=(500, 502, 503, 504))
+    except SourceError as e:
+        if "HTTP 404" in str(e):
+            return []
+        raise
+    repos = sorted((r for r in repos if not r.get("fork")), key=lambda r: -(r.get("stargazers_count") or 0))
+    return [
+        {
+            "url": r["html_url"],
+            "stars": r.get("stargazers_count") or 0,
+            "description": (r.get("description") or "")[:120],
+            "updated": (r.get("pushed_at") or "")[:10],
+        }
+        for r in repos[:limit]
+    ]
+
+
+def add_github_pocs(items: list[dict], key: str = "id") -> None:
+    """Set github_pocs on each item: public PoC repositories indexed by nomi-sec/PoC-in-GitHub.
+
+    One request lists the CVEs of each year that have a PoC, so only those are fetched.
+    """
+    ids = [i.get(key) or "" for i in items]
+    years = {cve_id.split("-")[1] for cve_id in ids if cve_id.startswith("CVE-")}
+    index = _poc_index(years) if years else set()
+    hits = [i for i in items if i.get(key) in index]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for item, repos in zip(hits, pool.map(lambda i: github_pocs(i[key]), hits)):
+            item["github_pocs"] = repos
+            if repos and EXPLOIT_RANK.get(item.get("exploit") or "", 0) < EXPLOIT_RANK["poc"]:
+                item["exploit"] = "poc"
+    for item in items:
+        item.setdefault("github_pocs", [])
 
 
 def apply_filters(
@@ -455,6 +533,7 @@ def fetch_nvd_recent(
     in_range = len(items)  # after dropping platform-only CPE matches
     if poc:
         mark_kev_exploited(items)
+        add_github_pocs(items)
     items = apply_filters(items, min_severity, min_score, rce, match_any, poc)
     items.sort(key=lambda i: i["published"] or "", reverse=True)
     return {
@@ -577,6 +656,7 @@ def fetch_ghsa_recent(
     recent = [a for a in advisories.values() if (a["published"] or "") >= since_iso]
     if poc:
         mark_kev_exploited(recent, key="cve_id")
+        add_github_pocs(recent, key="cve_id")
     items = sorted(
         apply_filters(recent, min_severity, min_score, rce, match_any, poc),
         key=lambda a: a["published"] or "",
@@ -655,26 +735,18 @@ def normalize_cvelist(record: dict) -> dict:
             refs.setdefault(r["url"], set()).update(r.get("tags") or [])
     exploit_refs = [url for url, tags in refs.items() if "exploit" in tags]
 
-    status = "poc" if exploit_refs else None
-
-    def bump(new: str) -> None:
-        nonlocal status
-        if EXPLOIT_RANK[new] > EXPLOIT_RANK.get(status or "", 0):
-            status = new
-
+    # As in exploit_status: only exploitation sets the status here, a PoC needs a GitHub repository
+    status = None
     for c in containers:
         for m in c.get("metrics", []):
             other = m.get("other", {})
-            if other.get("type") == "kev":
-                bump("active")
-            elif other.get("type") == "ssvc":
-                for option in other.get("content", {}).get("options", []):
-                    if option.get("Exploitation") in EXPLOIT_RANK:
-                        bump(option["Exploitation"])
+            if other.get("type") == "kev" or (
+                other.get("type") == "ssvc"
+                and any(o.get("Exploitation") == "active" for o in other.get("content", {}).get("options", []))
+            ):
+                status = "active"
     if vector and "/E:A" in vector:
-        bump("active")
-    elif vector and "/E:P" in vector:
-        bump("poc")
+        status = "active"
 
     products, affected = set(), []
     for c in containers:
@@ -863,6 +935,7 @@ def fetch_cvelist_recent(
     in_range = len(items)
     if poc:
         mark_kev_exploited(items)
+        add_github_pocs(items)
     items = apply_filters(items, min_severity, min_score, rce, match_any, poc)
     items.sort(key=lambda i: i["published"] or "", reverse=True)
     return {
@@ -971,9 +1044,9 @@ def fetch_epss(cve_ids: list[str]) -> dict[str, dict]:
 
 
 def enrich(cves: list[dict], key: str = "id") -> list[dict]:
-    """Add EPSS and KEV membership to items whose CVE ID is under `key`.
+    """Add EPSS, KEV membership and PoC repositories on GitHub to items whose CVE ID is under `key`.
 
-    Items that already carry an `epss` value (GHSA does) keep it. Failures degrade to None.
+    Items that already carry an `epss` value (GHSA does) or `github_pocs` keep them. Failures degrade to None.
     """
     ids = [c[key] for c in cves if c.get(key) and not c.get("epss")]
     try:
@@ -991,6 +1064,12 @@ def enrich(cves: list[dict], key: str = "id") -> list[dict]:
         c["in_cisa_kev"] = (cve_id in kev) if kev is not None and cve_id else None
         if c["in_cisa_kev"]:
             c["exploit"] = "active"
+    todo = [c for c in cves if "github_pocs" not in c]
+    try:
+        add_github_pocs(todo, key=key)
+    except SourceError:
+        for c in todo:
+            c["github_pocs"] = None
     return cves
 
 

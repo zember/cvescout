@@ -165,7 +165,8 @@ def _run(config: dict, db: sqlite3.Connection, dry_run: bool) -> dict:
 
     items = list(found.values())
     for item in items:
-        item.pop("epss", None)  # stored copies carry yesterday's EPSS
+        item.pop("epss", None)  # stored copies carry yesterday's EPSS and PoC list
+        item.pop("github_pocs", None)
     sources.add_risk(items)
 
     thresholds = {w["name"]: w.get("min_priority", config.get("min_priority", "high")) for w in config["watch"]}

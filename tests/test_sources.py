@@ -110,7 +110,17 @@ def test_enrich_degrades_when_sources_fail(monkeypatch):
 
     monkeypatch.setattr(sources, "_get_json", boom)
     cves = sources.enrich([{"id": "CVE-2026-1"}])
-    assert cves[0]["epss"] is None and cves[0]["in_cisa_kev"] is None
+    assert cves[0]["epss"] is None and cves[0]["in_cisa_kev"] is None and cves[0]["github_pocs"] is None
+
+
+def test_enrich_adds_github_pocs(monkeypatch):
+    monkeypatch.setattr(sources, "fetch_epss", lambda ids: {})
+    monkeypatch.setattr(sources, "kev_ids", lambda: set())
+    monkeypatch.setattr(sources, "_get_json", _fake_poc_github)
+    items = [{"id": "CVE-2026-3", "exploit": None}, {"id": "CVE-2026-4", "exploit": None}]
+    sources.enrich(items)
+    assert items[0]["exploit"] == "poc" and len(items[0]["github_pocs"]) == 2
+    assert items[1]["exploit"] is None and items[1]["github_pocs"] == []
 
 
 def test_find_unsourced_cves():
@@ -192,6 +202,7 @@ def test_ghsa_rate_limit_is_not_retried(monkeypatch):
 def test_enrich_keeps_existing_epss_and_handles_missing_cve(monkeypatch):
     monkeypatch.setattr(sources, "fetch_epss", lambda ids: {i: {"epss": 0.5, "percentile": 0.9} for i in ids})
     monkeypatch.setattr(sources, "kev_ids", lambda: {"CVE-2026-2"})
+    monkeypatch.setattr(sources, "add_github_pocs", lambda items, key="id": None)
     items = [
         {"cve_id": "CVE-2026-1", "epss": {"epss": 0.1, "percentile": 0.2}},
         {"cve_id": "CVE-2026-2", "epss": None},
@@ -290,22 +301,80 @@ def test_exploit_status_signals():
 
     tagged = {**base, "references": [{"url": "https://exploit-db.com/x", "tags": ["Exploit", "Third Party Advisory"]},
                                      {"url": "https://vendor/patch", "tags": ["Patch"]}]}
-    assert sources.exploit_status(tagged) == ("poc", ["https://exploit-db.com/x"])
+    # listed, but an "Exploit" tag alone (often a bug bounty report) does not make a PoC
+    assert sources.exploit_status(tagged) == (None, ["https://exploit-db.com/x"])
 
     ssvc = {**base, "metrics": {"ssvcV203": [{"ssvcData": {"options": [{"exploitation": "active"}]}}]}}
     assert sources.exploit_status(ssvc)[0] == "active"
 
-    v4 = {**base, "metrics": {"cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:P"}}]}}
-    assert sources.exploit_status(v4)[0] == "poc"
+    v4 = {**base, "metrics": {"cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:A"}}]}}
+    assert sources.exploit_status(v4)[0] == "active"
+
+    # SSVC "poc" and CVSS v4 E:P rest on reports like the HackerOne one for curl: only a GitHub repository makes a PoC
+    ssvc_poc = {**base, "metrics": {"ssvcV203": [{"ssvcData": {"options": [{"exploitation": "poc"}]}}],
+                                    "cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:P"}}]}}
+    assert sources.exploit_status(ssvc_poc)[0] is None
 
 
-def test_poc_filter_counts_kev_as_exploited(monkeypatch):
-    vulns = [_cve("CVE-2026-1", "2026-10-26T01:00:00.000"), _cve("CVE-2026-2", "2026-10-26T02:00:00.000")]
-    vulns[0]["cve"]["references"] = [{"url": "https://poc", "tags": ["Exploit"]}]
-    monkeypatch.setattr(sources, "_get_json", lambda url, headers=None: {"totalResults": 2, "vulnerabilities": vulns})
+def test_poc_index_is_cached_on_disk(monkeypatch):
+    calls = []
+
+    def fake_get(url, headers=None, retries=3, retry_on=()):
+        calls.append(url)
+        return _fake_poc_github(url)
+
+    monkeypatch.setattr(sources, "_get_json", fake_get)
+    assert sources._poc_index({"2026"}) == {"CVE-2026-3"}
+    sources._cache.clear()
+    assert sources._poc_index({"2026"}) == {"CVE-2026-3"}
+    assert len(calls) == 2  # root + 2026, once
+    sources._poc_index({"2025", "2026"})
+    assert len(calls) == 4  # only the missing year
+
+
+def _fake_poc_github(url, headers=None, retries=3, retry_on=()):
+    if url == f"{sources.POC_TREES_URL}/master":
+        return {"tree": [{"path": "2025", "type": "tree", "sha": "y2025"}, {"path": "2026", "type": "tree", "sha": "y2026"}]}
+    if url == f"{sources.POC_TREES_URL}/y2026":
+        return {"tree": [{"path": "CVE-2026-3.json", "type": "blob"}]}
+    if url == f"{sources.POC_TREES_URL}/y2025":
+        return {"tree": []}
+    if url == f"{sources.POC_RAW_URL}/2026/CVE-2026-3.json":
+        return [
+            {"html_url": "https://github.com/a/fork", "stargazers_count": 99, "fork": True},
+            {"html_url": "https://github.com/b/poc", "stargazers_count": 3, "description": "PoC", "pushed_at": "2026-10-25T00:00:00Z"},
+            {"html_url": "https://github.com/c/poc", "stargazers_count": 7, "pushed_at": "2026-10-24T00:00:00Z"},
+        ]
+    raise AssertionError(f"unexpected url {url}")
+
+
+def test_poc_filter_needs_github_poc_or_kev(monkeypatch):
+    vulns = [_cve(f"CVE-2026-{n}", f"2026-10-26T0{n}:00:00.000") for n in (1, 2, 3)]
+    # a reference NVD tagged "Exploit" (e.g. a HackerOne report, listed twice) is not enough on its own
+    vulns[0]["cve"]["references"] = [{"url": "https://hackerone.com/reports/1", "tags": ["Exploit"]}] * 2
+
+    def fake_get(url, headers=None, retries=3, retry_on=()):
+        if url.startswith(sources.NVD_URL):
+            return {"totalResults": 3, "vulnerabilities": vulns}
+        return _fake_poc_github(url)
+
+    monkeypatch.setattr(sources, "_get_json", fake_get)
     monkeypatch.setattr(sources, "kev_ids", lambda: {"CVE-2026-2"})
     data = sources.fetch_nvd_recent(days=1, poc=True)
-    assert {c["id"]: c["exploit"] for c in data["cves"]} == {"CVE-2026-2": "active", "CVE-2026-1": "poc"}
+    assert {c["id"]: c["exploit"] for c in data["cves"]} == {"CVE-2026-3": "poc", "CVE-2026-2": "active"}
+    assert [r["url"] for r in data["cves"][0]["github_pocs"]] == ["https://github.com/c/poc", "https://github.com/b/poc"]
+    assert data["cves"][0]["github_pocs"][0]["updated"] == "2026-10-24"
+
+    data = sources.fetch_nvd_recent(days=1)
+    assert data["cves"][2]["exploit_refs"] == ["https://hackerone.com/reports/1"]
+
+
+def test_github_pocs_missing_cve_is_empty(monkeypatch):
+    def fake_get(url, headers=None, retries=3, retry_on=()):
+        raise sources.SourceError("raw.githubusercontent.com: HTTP 404")
+
+    monkeypatch.setattr(sources, "_get_json", fake_get)
+    assert sources.github_pocs("CVE-2026-404") == []
 
 
 @pytest.mark.parametrize(
@@ -475,6 +544,8 @@ def _fake_cvelist(monkeypatch, zips, log=(), records=None):
             return list(log)
         if url == sources.KEV_URL:
             return {"vulnerabilities": []}
+        if url.startswith(sources.POC_TREES_URL):
+            return {"tree": []}
         for suffix, body in zips.items():
             if url.endswith(suffix):
                 if body is None:
@@ -664,7 +735,8 @@ def test_feed_sort_risk_ranks_all_matches_before_limit(monkeypatch, capsys):
     assert main(["feed", "--days", "7", "--sort", "risk", "--limit", "1"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert seen["limit"] > 1
-    assert len(out) == 2 and "CVE-2026-2" in out[1] and "critical" in out[1]
+    assert len(out) == 3 and out[1].split()[:3] == ["PUBLISHED", "(UTC)", "CVE"] and "RISK" in out[1]
+    assert "CVE-2026-2" in out[2] and "critical" in out[2]
 
 
 def test_cvelist_url_matches_reference_links(monkeypatch):
