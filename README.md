@@ -23,12 +23,16 @@ lub Twój własny agent, bez osobnego klucza API.
 macOS / Linux:
 
 ```bash
+git clone <adres repozytorium> cvescout && cd cvescout
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
+
+Wymaga Pythona 3.11 lub nowszego.
 
 Windows (cmd):
 
 ```bat
+git clone <adres repozytorium> cvescout && cd cvescout
 python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
 ```
@@ -200,6 +204,71 @@ i podaje, które filtry zastosował.
 
 Długie zakresy dla dużych produktów (np. jądro Linux od 2020) wymagają wielu zapytań do NVD –
 bez `NVD_API_KEY` trwa to kilka minut.
+
+## Alerty o nowych CVE: `cvescout watch`
+
+`cvescout watch` sprawdza nowe CVE dla wybranych produktów, ocenia je [wynikiem ryzyka](#wynik-ryzyka-co-łatać-najpierw)
+i zgłasza każde CVE **raz** – ponownie tylko wtedy, gdy jego priorytet wzrośnie (np. CISA doda je do KEV).
+**Nic nie uruchamia się samo:** każde `watch run` to jedno sprawdzenie; cykliczne uruchamianie trzeba włączyć samemu.
+
+```bash
+cvescout watch init             # tworzy przykładową konfigurację
+cvescout watch run --dry-run    # pokazuje alerty bez zapisywania i wysyłania
+cvescout watch run              # sprawdza, zapisuje stan, wysyła alerty
+cvescout watch list             # wcześniejsze alerty
+cvescout watch schedule         # wypisuje linię dla cron / Harmonogramu zadań (nic nie instaluje)
+```
+
+Konfiguracja: `~/.config/cvescout/watch.toml` (Windows: `%APPDATA%\cvescout\watch.toml`) albo dowolny plik przez `--config`.
+Stan (SQLite) leży obok, w `watch.db`.
+
+```toml
+source = "cvelist"        # "cvelist" (świeże, do 30 dni wstecz) albo "nvd"
+min_priority = "high"     # critical, high, medium albo low
+initial_days = 7          # jak daleko wstecz patrzy pierwsze uruchomienie
+
+[[watch]]
+name = "curl"
+keywords = ["curl"]
+
+[[watch]]
+name = "Node.js"
+cpes = ["nodejs:node.js"]
+source = "nvd"            # nadpisanie dla jednego produktu
+min_priority = "medium"
+
+[notify]
+webhook_url = "https://hooks.slack.com/services/..."
+webhook_format = "slack"  # slack, discord albo json
+```
+
+- `keywords` są szerokie: `node.js` pasuje do każdego „… is a Node.js CMS”. Dla takich produktów użyj `cpes`
+  (nazwę znajdzie `cvescout cpe`) i `source = "nvd"` – CVE List ma CPE tylko od części producentów.
+  NVD przypisuje CPE z opóźnieniem kilku dni, za to bez fałszywych trafień.
+- Każde uruchomienie zaczyna od czasu poprzedniego (z godzinnym zapasem), a CVE z ostatnich 30 dni ocenia od nowa
+  (EPSS i KEV zmieniają się po publikacji), więc alert przyjdzie także dla starszego CVE, które właśnie trafiło do KEV.
+- Alerty zawsze trafiają na stdout (`--json` dla skryptów), a z `webhook_url` także na webhook. Jeśli webhook nie odpowie,
+  alerty nie są oznaczane jako wysłane i przyjdą przy następnym uruchomieniu.
+- Niektórzy producenci (np. curl) nie podają CVSS – do czasu oceny przez NVD wynik ryzyka liczy brak CVSS jako 5.0.
+
+### Włączenie cyklicznego sprawdzania
+
+`cvescout watch schedule` wypisuje gotowe polecenie z właściwymi ścieżkami. Dla macOS / Linux (cron, co godzinę):
+
+```bash
+crontab -e
+# dopisz:
+0 * * * * "/sciezka/do/cvescout/.venv/bin/cvescout" watch run >> "$HOME/.config/cvescout/watch.log" 2>&1
+```
+
+Windows (cmd, Harmonogram zadań, co godzinę):
+
+```bat
+schtasks /Create /SC HOURLY /TN cvescout-watch /TR "\"C:\sciezka\do\cvescout\.venv\Scripts\cvescout.exe\" watch run"
+schtasks /Delete /TN cvescout-watch
+```
+
+Wyłączenie: usuń linię z `crontab -e` albo zadanie `cvescout-watch`.
 
 ## Serwer MCP
 

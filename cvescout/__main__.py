@@ -147,6 +147,44 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _watch(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import watch
+
+    path = Path(args.config).expanduser() if args.config else watch.default_config_path()
+    if args.action == "init":
+        if watch.init(path):
+            print(f"Created {path}\nEdit the [[watch]] sections, then try: cvescout watch run --dry-run")
+        else:
+            print(f"{path} already exists; edit it or pass --config to use another file.")
+        return 0
+    if args.action == "schedule":
+        print(watch.schedule_help(path))
+        return 0
+    try:
+        if args.action == "list":
+            rows = watch.list_alerts(path, limit=args.limit)
+            if args.json:
+                print(json.dumps(rows, indent=2, ensure_ascii=False))
+            for r in [] if args.json else rows:
+                print(f"{(r['published'] or '')[:16]}  {r['cve_id']:<18} {r['score']:>3} {r['priority']:<8} {r['watch']}")
+            return 0
+        result = watch.run(path, dry_run=args.dry_run)
+    except (watch.WatchError, sources.SourceError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    note = " (dry run: nothing stored or sent)" if result["dry_run"] else ""
+    print(f"Checked since {result['checked_since'][:16]} UTC: {result['matched']} matching CVEs, "
+          f"{len(result['alerts'])} alert(s){note}")
+    for a in result["alerts"]:
+        print(watch.format_alert(a))
+    return 0
+
+
 def _mcp(args: argparse.Namespace) -> int:
     from .mcp_server import server
 
@@ -200,6 +238,18 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("question", nargs="+")
     ask.add_argument("-v", "--verbose", action="store_true", help="show tool calls")
     ask.set_defaults(func=_ask)
+
+    watch = sub.add_parser("watch", help="alerts about new CVEs for your products (runs only when you call it)")
+    watch.add_argument(
+        "action", choices=["init", "run", "list", "schedule"],
+        help="init: create the config; run: check once; list: past alerts; schedule: print a cron/Task Scheduler line",
+    )
+    watch.add_argument("--config", metavar="PATH", help="config file (default: ~/.config/cvescout/watch.toml, "
+                       "Windows: %%APPDATA%%\\cvescout\\watch.toml)")
+    watch.add_argument("--dry-run", action="store_true", help="run: show alerts without storing or sending them")
+    watch.add_argument("--limit", type=int, default=50, help="list: max rows (default 50)")
+    watch.add_argument("--json", action="store_true")
+    watch.set_defaults(func=_watch)
 
     mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop and other agents")
     mcp.set_defaults(func=_mcp)
