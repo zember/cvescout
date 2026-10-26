@@ -570,3 +570,17 @@ def test_mcp_server_exposes_all_tools_read_only():
     assert set(listed) == {t.name for t in tools.ALL_TOOLS}
     assert "source" in listed["search_recent_cves"].input_schema["properties"]
     assert all(t.annotations.read_only_hint for t in listed.values())
+
+
+def test_nvd_searches_skip_rejected_cves(monkeypatch):
+    calls = []
+
+    def fake_get(url, headers=None):
+        calls.append(parse_qs(urlsplit(url).query, keep_blank_values=True))
+        return {"totalResults": 0, "vulnerabilities": []}
+
+    monkeypatch.setattr(sources, "_get_json", fake_get)
+    sources.fetch_nvd_recent(days=2)
+    sources.fetch_nvd_recent(since="2020-01-01", cpe="haxx:curl")
+    sources.fetch_nvd_cve("CVE-2026-1234")  # a direct lookup still shows a rejection
+    assert [("noRejected" in q) for q in calls] == [True, True, False]

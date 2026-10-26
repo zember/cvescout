@@ -101,6 +101,8 @@ Kolumna po ocenie pokazuje `RCE`, `PoC` (exploit publiczny) lub `EXPLOITED` (akt
 - `--poc` korzysta z linków oznaczonych przez NVD jako „Exploit”, oceny CISA SSVC, dojrzałości exploita w CVSS v4 i CISA KEV.
   Brak oznaczenia nie znaczy, że exploita nie ma.
 - `--rce` to heurystyka – traktuj wynik jako „prawdopodobne RCE” i sprawdzaj opis.
+- CVE odrzucone (REJECTED: duplikaty, numery nadane przez pomyłkę, zgłoszenia, które nie okazały się podatnością) są pomijane.
+  `get_cve_details` dla pojedynczego CVE nadal pokazuje status odrzucenia.
 
 ### Nazwy CPE: `cvescout cpe`
 

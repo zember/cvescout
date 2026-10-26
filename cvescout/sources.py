@@ -425,6 +425,8 @@ def fetch_nvd_recent(
         return result
 
     for query in queries or [{}]:
+        # Withdrawn IDs (duplicates, not a vulnerability) have no score or product, only noise
+        query = {**query, "noRejected": ""}
         if long_range:
             # Most products have few CVEs: their whole history fits in one page,
             # which is cheaper than one request per 120-day window.
