@@ -23,7 +23,7 @@ lub Twój własny agent, bez osobnego klucza API.
 macOS / Linux:
 
 ```bash
-git clone <adres repozytorium> cvescout && cd cvescout
+git clone https://github.com/zember/cvescout.git && cd cvescout
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
 
@@ -32,7 +32,7 @@ Wymaga Pythona 3.11 lub nowszego.
 Windows (cmd):
 
 ```bat
-git clone <adres repozytorium> cvescout && cd cvescout
+git clone https://github.com/zember/cvescout.git && cd cvescout
 python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
 ```
@@ -331,3 +331,7 @@ async with Client(StdioServerParameters(command=".venv/bin/cvescout", args=["mcp
 ```bash
 .venv/bin/pytest
 ```
+
+## Licencja
+
+[MIT](LICENSE)

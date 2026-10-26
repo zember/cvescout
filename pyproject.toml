@@ -3,7 +3,12 @@ name = "cvescout"
 version = "0.1.0"
 description = "Find the latest CVEs from live sources (NVD, CVE List, GHSA, CISA KEV, EPSS) with a Claude agent and an MCP server"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["anthropic>=2.3", "mcp>=2.3"]
+
+[project.urls]
+Homepage = "https://github.com/zember/cvescout"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -12,7 +17,7 @@ dev = ["pytest"]
 cvescout = "cvescout.__main__:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
