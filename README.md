@@ -42,6 +42,11 @@ python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
 ```
 
+The `cvescout` command lives in the virtual environment, so activate it in each new terminal
+(`source .venv/bin/activate`, or `.venv\Scripts\activate` in cmd) or see [Running without `activate`](#running-without-activate).
+Note that `./cvescout` in the project folder is the Python package directory, not an executable — running it gives
+`permission denied`.
+
 API keys are all optional except `ANTHROPIC_API_KEY` for `ask`. In cmd use `set` instead of `export` (or `setx` to keep it):
 
 ```bash
@@ -54,7 +59,15 @@ export ANTHROPIC_API_KEY=...  # only for `cvescout ask` (or `ant auth login`); t
 
 - **Windows:** the project folder contains `cvescout.cmd`. Run `C:\path\to\cvescout\cvescout.cmd feed --days 2`, or add
   the project folder to PATH so that `cvescout feed --days 2` works in any cmd window.
-- **macOS / Linux:** `ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout` (`~/.local/bin` must be on PATH).
+- **macOS / Linux:** run from the project folder:
+
+  ```bash
+  mkdir -p ~/.local/bin && ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout
+  ```
+
+  If `~/.local/bin` is not on PATH yet, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` (or `~/.bashrc`).
+  Alternatively, an alias in the same file: `alias cvescout="/path/to/cvescout/.venv/bin/cvescout"`.
+  Don't put the whole `.venv/bin` on PATH — it would shadow `python` and `pip` everywhere.
 - **Any system:** `pipx install -e .` installs `cvescout` globally in its own environment.
 
 ## Usage
