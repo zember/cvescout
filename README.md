@@ -117,7 +117,7 @@ cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce     
 cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # broader, by description words
 ```
 
-The TAGS column shows `RCE`, `PoC` (PoC repository on GitHub; with `--poc`, `--enrich` or `--sort risk`) or `EXPLOITED`
+The TAGS column shows `RCE`, `PoC` (PoC rating; GitHub repositories with `--poc`, `--enrich` or `--sort risk`) or `EXPLOITED`
 (exploited in the wild: CISA KEV, SSVC or CVSS v4).
 
 - NVD accepts date ranges of up to 120 days. A longer range (`--since`) needs `--keyword` or `--cpe`: the product's
@@ -126,10 +126,11 @@ The TAGS column shows `RCE`, `PoC` (PoC repository on GitHub; with `--poc`, `--e
   skips e.g. applications that merely "run on" Linux). It only covers CVEs NVD has already analyzed, which takes days
   to weeks, so for the newest CVEs use `--keyword`, or `--cvelist` with `--url` (below).
 - **PoC means a public PoC repository on GitHub**, from [nomi-sec/PoC-in-GitHub](https://github.com/nomi-sec/PoC-in-GitHub)
-  (updated daily). They are listed under each CVE, most starred first, and as `github_pocs` in `--json`. `--poc` also
-  passes CVEs exploited in the wild (`EXPLOITED`). References NVD tagged "Exploit", CISA SSVC `poc` and CVSS v4 `E:P`
-  do not count: for curl, for example, they rest on the HackerOne report with reproduction steps, not on exploit code.
-  Exploits published only in blog posts are missed.
+  (updated daily; listed under each CVE, most starred first, and as `github_pocs` in `--json`), **or** a CISA SSVC `poc`
+  / CVSS v4 `E:P` rating, e.g. for an exploit in a gist. The rating is ignored when the CVE links a bug bounty report
+  (HackerOne, Bugcrowd, huntr, …): for curl it rests on the HackerOne report with reproduction steps, not on exploit
+  code. A reference NVD tagged "Exploit" alone does not count. `--poc` also passes CVEs exploited in the wild
+  (`EXPLOITED`). Exploits published only in blog posts are missed, and some "PoC" repositories are only scanners.
 - The list of CVEs with a PoC costs 2–3 GitHub API requests and is kept for 6 hours in `~/.cache/cvescout/`
   (Windows: `%LOCALAPPDATA%\cvescout\`). Without `GITHUB_TOKEN` GitHub allows 60 requests / h, shared with `--cvelist`;
   if the lookup fails, `--enrich` and `--sort risk` go on without it, `--poc` stops with an error.

@@ -388,8 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument(
         "--poc", action="store_true",
         help="only CVEs with a public PoC repository on GitHub (nomi-sec/PoC-in-GitHub), a CISA SSVC / CVSS v4 "
-        "PoC rating, or exploited in the wild (CISA KEV), and list the repositories; unverified code, may be "
-        "malware: read it, don't run it",
+        "PoC rating not based on a bug bounty report, or exploited in the wild (CISA KEV), and list the "
+        "repositories; unverified code, may be malware: read it, don't run it",
     )
     feed.add_argument("--any", action="store_true", help="match ANY of --severity/--min-score/--rce/--poc instead of all")
     feed.add_argument("--limit", type=int, default=30, help="max rows to show (default 30)")

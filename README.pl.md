@@ -117,7 +117,7 @@ cvescout feed --since 2020-01-01 --cpe nodejs:node.js --cpe haxx:curl --rce     
 cvescout feed --since 2020-01-01 --keyword node.js --keyword curl --rce --limit 100  # szerzej, po słowach z opisu
 ```
 
-Kolumna TAGS pokazuje `RCE`, `PoC` (repozytorium PoC na GitHubie; z `--poc`, `--enrich` lub `--sort risk`) lub `EXPLOITED`
+Kolumna TAGS pokazuje `RCE`, `PoC` (ocena PoC; repozytoria na GitHubie z `--poc`, `--enrich` lub `--sort risk`) lub `EXPLOITED`
 (aktywnie wykorzystywana: CISA KEV, SSVC lub CVSS v4).
 
 - NVD przyjmuje zakres dat do 120 dni. Dłuższy zakres (`--since`) wymaga `--keyword` albo `--cpe` – wtedy pobierana
@@ -126,10 +126,12 @@ Kolumna TAGS pokazuje `RCE`, `PoC` (repozytorium PoC na GitHubie; z `--poc`, `--
   (pomija np. aplikacje, które jedynie „działają na” Linuksie). Obejmuje jednak tylko CVE już przeanalizowane przez NVD –
   to trwa od kilku dni do tygodni, więc dla najświeższych CVE użyj `--keyword`.
 - **PoC oznacza publiczne repozytorium PoC na GitHubie** z [nomi-sec/PoC-in-GitHub](https://github.com/nomi-sec/PoC-in-GitHub)
-  (aktualizowane codziennie). Repozytoria są wypisane pod każdym CVE, od najczęściej oznaczanych gwiazdką, a w `--json`
-  jako `github_pocs`. `--poc` przepuszcza też CVE aktywnie wykorzystywane (`EXPLOITED`). Linki oznaczone przez NVD jako
-  „Exploit”, ocena CISA SSVC `poc` i CVSS v4 `E:P` się nie liczą – przy curl opierają się np. na raporcie z HackerOne
-  z krokami odtworzenia, a nie na kodzie exploita. Exploity opisane tylko na blogach nie zostaną znalezione.
+  (aktualizowane codziennie; wypisane pod każdym CVE, od najczęściej oznaczanych gwiazdką, a w `--json` jako `github_pocs`)
+  **albo** ocenę CISA SSVC `poc` / CVSS v4 `E:P`, np. dla exploita w gist. Ocena nie liczy się, gdy CVE linkuje raport
+  z platformy bug bounty (HackerOne, Bugcrowd, huntr, …) – przy curl opiera się na raporcie z HackerOne z krokami
+  odtworzenia, a nie na kodzie exploita. Sam link oznaczony przez NVD jako „Exploit” nie wystarcza. `--poc` przepuszcza
+  też CVE aktywnie wykorzystywane (`EXPLOITED`). Exploity opisane tylko na blogach nie zostaną znalezione, a część
+  repozytoriów „PoC” to tylko skanery.
 - Lista CVE z PoC kosztuje 2–3 zapytania do API GitHuba i jest trzymana przez 6 godzin w `~/.cache/cvescout/`
   (Windows: `%LOCALAPPDATA%\cvescout\`). Bez `GITHUB_TOKEN` GitHub pozwala na 60 zapytań / h, wspólnych z `--cvelist`;
   gdy wyszukiwanie się nie uda, `--enrich` i `--sort risk` działają bez niego, a `--poc` kończy się błędem.

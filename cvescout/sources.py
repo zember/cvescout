@@ -172,24 +172,44 @@ def is_rce(text: str, cwes: list[str], vector: str | None) -> bool:
 EXPLOIT_RANK = {"poc": 1, "active": 2}
 
 
-def exploit_status(cve: dict) -> tuple[str | None, list[str]]:
-    """('active' | None, exploit reference URLs) from NVD data.
+# Bug bounty reports carry reproduction steps, so CISA SSVC and CNAs rate them as a PoC
+BUG_BOUNTY_HOSTS = ("hackerone.com", "bugcrowd.com", "huntr.com", "huntr.dev", "intigriti.com", "yeswehack.com")
 
-    'active' comes from CISA SSVC exploitation "active" or CVSS v4 E:A. Only
-    a PoC repository on GitHub makes 'poc' (add_github_pocs); KEV membership is
-    added by mark_kev_exploited and enrich. References NVD tagged "Exploit" and
-    SSVC "poc" / CVSS v4 E:P are not enough: for curl, for example, they rest on
-    the HackerOne report with reproduction steps, not on exploit code.
+
+def _rated_poc(rated: bool, urls: list[str]) -> bool:
+    """Trust a PoC rating (SSVC "poc", CVSS v4 E:P) unless a reference is a bug bounty report.
+
+    A CVE with both a bounty report and a real exploit link is counted as having no PoC;
+    a GitHub repository still marks it later (add_github_pocs).
+    """
+    hosts = {(urllib.parse.urlsplit(u).hostname or "").lower() for u in urls}
+    return rated and not any(h == b or h.endswith("." + b) for h in hosts for b in BUG_BOUNTY_HOSTS)
+
+
+def exploit_status(cve: dict) -> tuple[str | None, list[str]]:
+    """('active' | 'poc' | None, exploit reference URLs) from NVD data.
+
+    'active' comes from CISA SSVC exploitation "active" or CVSS v4 E:A; 'poc'
+    from SSVC "poc" or CVSS v4 E:P unless the CVE links a bug bounty report:
+    for curl, for example, those ratings rest on the HackerOne report with
+    reproduction steps, not on exploit code. A reference NVD tagged "Exploit"
+    alone is not enough. PoC repositories on GitHub and KEV membership are
+    added by add_github_pocs, mark_kev_exploited and enrich.
     """
     # NVD lists some URLs twice
     refs = list(dict.fromkeys(r["url"] for r in cve.get("references", []) if "Exploit" in (r.get("tags") or [])))
     metrics = cve.get("metrics", {})
-    active = any(
-        option.get("exploitation") == "active"
+    ssvc = {
+        option.get("exploitation")
         for m in metrics.get("ssvcV203", [])
         for option in m.get("ssvcData", {}).get("options", [])
-    ) or any("/E:A" in (m.get("cvssData", {}).get("vectorString") or "") for m in metrics.get("cvssMetricV40", []))
-    return ("active" if active else None), refs[:5]
+    }
+    vectors = [m.get("cvssData", {}).get("vectorString") or "" for m in metrics.get("cvssMetricV40", [])]
+    if "active" in ssvc or any("/E:A" in v for v in vectors):
+        return "active", refs[:5]
+    rated = "poc" in ssvc or any("/E:P" in v for v in vectors)
+    status = "poc" if _rated_poc(rated, [r["url"] for r in cve.get("references", [])]) else None
+    return status, refs[:5]
 
 
 def mark_kev_exploited(items: list[dict], key: str = "id") -> None:
@@ -735,18 +755,20 @@ def normalize_cvelist(record: dict) -> dict:
             refs.setdefault(r["url"], set()).update(r.get("tags") or [])
     exploit_refs = [url for url, tags in refs.items() if "exploit" in tags]
 
-    # As in exploit_status: only exploitation sets the status here, a PoC needs a GitHub repository
+    # Same rules as exploit_status
+    ssvc: set[str] = set()
     status = None
     for c in containers:
         for m in c.get("metrics", []):
             other = m.get("other", {})
-            if other.get("type") == "kev" or (
-                other.get("type") == "ssvc"
-                and any(o.get("Exploitation") == "active" for o in other.get("content", {}).get("options", []))
-            ):
+            if other.get("type") == "kev":
                 status = "active"
-    if vector and "/E:A" in vector:
+            elif other.get("type") == "ssvc":
+                ssvc.update(o.get("Exploitation") for o in other.get("content", {}).get("options", []))
+    if "active" in ssvc or (vector and "/E:A" in vector):
         status = "active"
+    elif status is None and _rated_poc("poc" in ssvc or bool(vector and "/E:P" in vector), list(refs)):
+        status = "poc"
 
     products, affected = set(), []
     for c in containers:

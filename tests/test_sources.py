@@ -310,10 +310,20 @@ def test_exploit_status_signals():
     v4 = {**base, "metrics": {"cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:A"}}]}}
     assert sources.exploit_status(v4)[0] == "active"
 
-    # SSVC "poc" and CVSS v4 E:P rest on reports like the HackerOne one for curl: only a GitHub repository makes a PoC
-    ssvc_poc = {**base, "metrics": {"ssvcV203": [{"ssvcData": {"options": [{"exploitation": "poc"}]}}],
-                                    "cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:P"}}]}}
-    assert sources.exploit_status(ssvc_poc)[0] is None
+    # SSVC "poc" / CVSS v4 E:P count, unless they rest on a bug bounty report as for curl
+    ssvc_poc = {"ssvcV203": [{"ssvcData": {"options": [{"exploitation": "poc"}]}}]}
+    curl = {**base, "metrics": ssvc_poc,
+            "references": [{"url": "https://hackerone.com/reports/3923520", "tags": ["Exploit", "Issue Tracking"]},
+                           {"url": "https://curl.se/docs/CVE-2026-19931.html", "tags": ["Vendor Advisory"]}]}
+    assert sources.exploit_status(curl) == (None, ["https://hackerone.com/reports/3923520"])
+
+    # TOTOLINK, not yet analyzed by NVD: untagged references, E:P from the CNA, exploit in a gist
+    totolink = {**base, "metrics": {"cvssMetricV40": [{"cvssData": {"vectorString": "CVSS:4.0/AV:N/E:P"}}]},
+                "references": [{"url": "https://gist.github.com/H3rmesk1t/ad72"}, {"url": "https://vuldb.com/vuln/426406"}]}
+    assert sources.exploit_status(totolink) == ("poc", [])
+
+    # a rating with nothing else known
+    assert sources.exploit_status({**base, "metrics": ssvc_poc})[0] == "poc"
 
 
 def test_poc_index_is_cached_on_disk(monkeypatch):
@@ -483,6 +493,17 @@ def _rec(cve_id, published, updated=None, score=None, kev=False, product="widget
                         "dateUpdated": updated or published},
         "containers": {"cna": cna, "adp": adp},
     }
+
+
+def test_cvelist_poc_rating_unless_bug_bounty_report():
+    def rec(ref):
+        r = _rec("CVE-2026-5", "2026-10-26T00:00:00.000Z")
+        r["containers"]["cna"]["references"] = [{"url": ref, "tags": ["exploit"]}]
+        r["containers"]["adp"] = [{"metrics": [{"other": {"type": "ssvc", "content": {"options": [{"Exploitation": "poc"}]}}}]}]
+        return sources.normalize_cvelist(r)
+
+    assert rec("https://gist.github.com/x/1")["exploit"] == "poc"
+    assert rec("https://hackerone.com/reports/1")["exploit"] is None
 
 
 def _zip(*records):

@@ -63,7 +63,7 @@ def search_recent_cves(
         min_score: Optional minimum CVSS base score (0-10), e.g. 8.
         rce_only: Only remote code execution (code/command injection reachable over the network; heuristic on CWE, description and CVSS vector).
         match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
-        poc_only: Only items with a public exploit: a PoC repository on GitHub (listed in github_pocs, from nomi-sec/PoC-in-GitHub), a CISA SSVC or CVSS v4 rating of a public PoC, or exploitation in the wild (CISA KEV). A reference NVD tagged "Exploit" alone does not count: it is often just a bug bounty report.
+        poc_only: Only items with a public exploit: a PoC repository on GitHub (listed in github_pocs, from nomi-sec/PoC-in-GitHub), a CISA SSVC or CVSS v4 rating of a public PoC (ignored when the CVE links a bug bounty report such as HackerOne), or exploitation in the wild (CISA KEV). A reference NVD tagged "Exploit" alone does not count.
     """
     fetch = sources.fetch_cvelist_recent if source == "cvelist" else sources.fetch_nvd_recent
     try:
@@ -169,7 +169,7 @@ def search_github_advisories(
         min_score: Optional minimum CVSS base score (0-10), e.g. 8.
         rce_only: Only remote code execution (code/command injection reachable over the network; heuristic on CWE, description and CVSS vector).
         match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
-        poc_only: Only items with a public exploit: a PoC repository on GitHub (listed in github_pocs, from nomi-sec/PoC-in-GitHub), a CISA SSVC or CVSS v4 rating of a public PoC, or exploitation in the wild (CISA KEV). A reference NVD tagged "Exploit" alone does not count: it is often just a bug bounty report.
+        poc_only: Only items with a public exploit: a PoC repository on GitHub (listed in github_pocs, from nomi-sec/PoC-in-GitHub), a CISA SSVC or CVSS v4 rating of a public PoC (ignored when the CVE links a bug bounty report such as HackerOne), or exploitation in the wild (CISA KEV). A reference NVD tagged "Exploit" alone does not count.
         sort_by: "published" (newest first) or "risk" (highest patch priority first, over the newest 100 advisories).
     """
     try:
