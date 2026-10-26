@@ -37,9 +37,9 @@ def env(monkeypatch, tmp_path):
     state = {"feed": {}, "kev": set(), "epss": {}, "calls": []}
     monkeypatch.setattr(sources, "now_utc", lambda: NOW)
 
-    def fake_fetch(source, since, keyword=None, cpe=None, limit=50):
-        state["calls"].append({"source": source, "since": since, "keyword": keyword, "cpe": cpe})
-        key = (keyword or cpe)[0]
+    def fake_fetch(source, since, keyword=None, cpe=None, limit=50, url=None):
+        state["calls"].append({"source": source, "since": since, "keyword": keyword, "cpe": cpe, "url": url})
+        key = (keyword or cpe or url)[0]
         return {"cves": [dict(i) for i in state["feed"].get(key, [])]}
 
     def fake_enrich(items, key="id"):
@@ -136,7 +136,7 @@ def test_failed_webhook_keeps_alerts_for_next_run(env, monkeypatch):
 
 @pytest.mark.parametrize("config, message", [
     ('min_priority = "urgent"\n[[watch]]\nname = "x"\nkeywords = ["x"]', "min_priority"),
-    ('[[watch]]\nname = "x"', "keywords or cpes"),
+    ('[[watch]]\nname = "x"', "keywords, cpes or urls"),
     ('source = "osv"\n[[watch]]\nname = "x"\nkeywords = ["x"]', "source"),
     ("source = ", "watch.toml"),
 ])
@@ -172,3 +172,15 @@ def test_cvelist_window_is_capped_at_30_days_but_nvd_is_not(env):
     env["path"].write_text(CONFIG.replace("initial_days = 7", "initial_days = 90"))
     watch.run(env["path"])
     assert [(c["source"], c["since"][:10]) for c in env["calls"]] == [("cvelist", "2026-09-26"), ("nvd", "2026-07-28")]
+
+
+def test_urls_find_cves_filed_under_a_bundled_library(env):
+    # e.g. a Brotli CVE that only Node.js's advisory page links to
+    env["path"].write_text(CONFIG.replace('source = "nvd"', 'source = "nvd"\nurls = ["nodejs.org/en/blog/vulnerability"]'))
+    env["feed"] = {
+        "nodejs:node.js": [_item("CVE-2026-1003")],
+        "nodejs.org/en/blog/vulnerability": [_item("CVE-2026-1003"), _item("CVE-2026-1497")],
+    }
+    alerts = watch.run(env["path"])["alerts"]
+    assert sorted(a["id"] for a in alerts if a["watch"] == "Node.js") == ["CVE-2026-1003", "CVE-2026-1497"]
+    assert [c["source"] for c in env["calls"] if c["url"]] == ["cvelist"]

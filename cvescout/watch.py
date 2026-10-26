@@ -32,9 +32,11 @@ min_priority = "high"
 # How far back the first run looks, in days
 initial_days = 7
 
-# One [[watch]] per product. keywords match the description, title, vendor and
-# product name (case-insensitive, any one is enough); cpes match the products
-# NVD or the vendor marked vulnerable (find names with `cvescout cpe <product>`).
+# One [[watch]] per product; any one match is enough:
+# - keywords: description, title, vendor or product name (case-insensitive)
+# - cpes: products NVD or the vendor marked vulnerable (find names with `cvescout cpe <product>`)
+# - urls: part of a reference link, always searched in the CVE List. The product's own
+#   advisory page catches CVEs filed under a library it bundles (e.g. Brotli in Node.js).
 
 [[watch]]
 name = "curl"
@@ -45,7 +47,8 @@ keywords = ["curl"]
 [[watch]]
 name = "Node.js"
 cpes = ["nodejs:node.js"]
-source = "nvd"            # per-product override
+urls = ["nodejs.org/en/blog/vulnerability"]
+source = "nvd"            # per-product override (for keywords and cpes)
 # min_priority = "medium"   # per-product override
 
 [notify]
@@ -99,8 +102,8 @@ def load_config(path: Path) -> dict:
         if w.get("min_priority", "high") not in sources.PRIORITY_ORDER:
             raise WatchError(f"{path}: min_priority must be one of {', '.join(sources.PRIORITY_ORDER)}")
     for w in watches:
-        if not w.get("name") or not (w.get("keywords") or w.get("cpes")):
-            raise WatchError(f"{path}: every [[watch]] needs a name and keywords or cpes")
+        if not w.get("name") or not (w.get("keywords") or w.get("cpes") or w.get("urls")):
+            raise WatchError(f"{path}: every [[watch]] needs a name and keywords, cpes or urls")
     for w in [config, *watches]:
         if w.get("source", "cvelist") not in ("cvelist", "nvd"):
             raise WatchError(f'{path}: source must be "cvelist" or "nvd"')
@@ -141,9 +144,14 @@ def run(config_path: Path, dry_run: bool = False) -> dict:
         else:
             fetch = sources.fetch_cvelist_recent
             since = max(start, now - timedelta(days=sources.CVELIST_MAX_DAYS))
-        data = fetch(since=since.isoformat(), keyword=w.get("keywords"), cpe=w.get("cpes"), limit=100_000)
-        for item in data["cves"]:
-            found[(item["id"], w["name"])] = item
+        items = []
+        if w.get("keywords") or w.get("cpes"):
+            items += fetch(since=since.isoformat(), keyword=w.get("keywords"), cpe=w.get("cpes"), limit=100_000)["cves"]
+        if w.get("urls"):
+            since = max(start, now - timedelta(days=sources.CVELIST_MAX_DAYS))
+            items += sources.fetch_cvelist_recent(since=since.isoformat(), url=w["urls"], limit=100_000)["cves"]
+        for item in items:
+            found.setdefault((item["id"], w["name"]), item)
 
     # Re-score what was seen recently: EPSS and KEV change after publication
     since = (now - timedelta(days=RECHECK_DAYS)).isoformat()

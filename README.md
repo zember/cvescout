@@ -168,7 +168,13 @@ Systemy operacyjne mają prefiks `o:` (np. `o:linux:linux_kernel`), sprzęt `h:`
 cvescout feed --cvelist --days 1                          # wszystko z ostatnich 24 h, bez limitów NVD
 cvescout feed --cvelist --days 7 --rce --min-score 8      # te same filtry co dla NVD
 cvescout feed --cvelist --days 3 --keyword nginx --json   # słowo w opisie, tytule, nazwie producenta lub produktu
+cvescout feed --cvelist --days 7 --url nodejs.org/en/blog/vulnerability   # CVE, do których linkuje biuletyn Node.js
 ```
+
+`--url` dopasowuje fragment linku w referencjach CVE. Najlepiej podać stronę biuletynów bezpieczeństwa producenta: znajdzie
+wtedy także CVE zgłoszone dla **biblioteki dołączonej do produktu**. Przykład: CVE-2026-111497 zgłosił Google dla Brotli –
+w opisie nie ma słowa „Node.js”, NVD jeszcze nie przypisał CPE, a jedynym śladem jest link do biuletynu Node.js.
+`--keyword node.js` i `--cpe nodejs:node.js` go nie znajdą, `--url nodejs.org/en/blog/vulnerability` – tak.
 
 `--cvelist` czyta oficjalną listę CVE zamiast NVD: dzienne paczki zmian z
 [GitHub Releases](https://github.com/CVEProject/cvelistV5/releases) (kilka MB na dzień) uzupełnione indeksem `deltaLog.json`.
@@ -234,7 +240,8 @@ keywords = ["curl"]
 [[watch]]
 name = "Node.js"
 cpes = ["nodejs:node.js"]
-source = "nvd"            # nadpisanie dla jednego produktu
+urls = ["nodejs.org/en/blog/vulnerability"]   # zawsze szukane w CVE List
+source = "nvd"            # nadpisanie dla jednego produktu (dotyczy keywords i cpes)
 min_priority = "medium"
 
 [notify]
@@ -242,9 +249,13 @@ webhook_url = "https://hooks.slack.com/services/..."
 webhook_format = "slack"  # slack, discord albo json
 ```
 
+- Wystarczy jedno dopasowanie: `keywords`, `cpes` albo `urls`.
 - `keywords` są szerokie: `node.js` pasuje do każdego „… is a Node.js CMS”. Dla takich produktów użyj `cpes`
   (nazwę znajdzie `cvescout cpe`) i `source = "nvd"` – CVE List ma CPE tylko od części producentów.
   NVD przypisuje CPE z opóźnieniem kilku dni, za to bez fałszywych trafień.
+- `urls` (fragment linku w referencjach, zawsze z CVE List) łapie CVE od razu i także w bibliotekach dołączonych do
+  produktu – np. biuletyn Node.js linkuje CVE w Brotli. W tygodniu 19–26.10 tylko `urls` znalazło 10 CVE Node.js,
+  bo NVD nie przypisał im jeszcze CPE.
 - Każde uruchomienie zaczyna od czasu poprzedniego (z godzinnym zapasem), a CVE z ostatnich 30 dni ocenia od nowa
   (EPSS i KEV zmieniają się po publikacji), więc alert przyjdzie także dla starszego CVE, które właśnie trafiło do KEV.
 - Alerty zawsze trafiają na stdout (`--json` dla skryptów), a z `webhook_url` także na webhook. Jeśli webhook nie odpowie,

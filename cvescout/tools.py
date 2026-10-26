@@ -46,11 +46,13 @@ def search_recent_cves(
     cpes: list[str] | None = None,
     source: Literal["nvd", "cvelist"] = "nvd",
     sort_by: Literal["published", "risk"] = "published",
+    reference_urls: list[str] | None = None,
 ) -> str:
     """Search for CVEs published in the last N days (or since a date), enriched with EPSS exploit probability, CISA KEV membership and a risk score (patch priority).
 
     Args:
         sort_by: "published" (newest first) or "risk" (highest patch priority first, ranked over all matches). Use "risk" for "what should I patch first", "most dangerous", "top N".
+        reference_urls: Only with source="cvelist": match parts of reference links, OR-ed with keywords/cpes. A product's security advisory page finds CVEs filed under libraries it bundles, e.g. ["nodejs.org/en/blog/vulnerability"] finds a Brotli or OpenSSL CVE that Node.js lists. Use it together with keywords for a product.
         source: "nvd" (default; NVD API, any date range, CPE filters cover NVD-analyzed CVEs) or "cvelist" (CVEProject CVE List: last 30 days only, no rate limit, CVEs appear about an hour before NVD, includes vendor-supplied affected versions; keywords also match vendor and product names; CPE filters only match where the vendor supplied CPEs). Use "cvelist" for the last hours or days, or when NVD is unavailable or slow.
         days: Look-back window in days. Use small windows (1-7) for "latest". Ignored when `since` is set.
         keywords: Optional free-text filters, OR-ed (one search each), e.g. ["openssl"] or ["node.js", "curl"]. Matches anywhere in the description, so it is broad.
@@ -76,6 +78,7 @@ def search_recent_cves(
             since=since,
             cpe=cpes,
             limit=100_000 if sort_by == "risk" else max(1, min(limit, 100)),
+            **({"url": reference_urls} if source == "cvelist" else {}),
         )
     except sources.SourceError as e:
         return _error(e)

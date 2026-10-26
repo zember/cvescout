@@ -707,7 +707,8 @@ def normalize_cvelist(record: dict) -> dict:
         "exploit_refs": exploit_refs[:5],
         "affected_products": sorted(products),
         "affected": affected[:10],
-        "references": list(refs)[:5],
+        # All of them: a product's own advisory link is often the only trace of a bundled library
+        "references": list(refs)[:30],
         "url": f"https://www.cve.org/CVERecord?id={meta['cveId']}",
         "nvd_url": f"https://nvd.nist.gov/vuln/detail/{meta['cveId']}",
     }
@@ -749,6 +750,7 @@ def fetch_cvelist_recent(
     since: str | None = None,
     cpe: str | list[str] | None = None,
     poc: bool = False,
+    url: str | list[str] | None = None,
 ) -> dict:
     """CVEs published in the last `days` days (at most 30), newest first, from the CVE List.
 
@@ -758,8 +760,10 @@ def fetch_cvelist_recent(
     The zips miss records published shortly after midnight UTC, before the
     day's baseline is cut, so the 30-day delta log is checked for new IDs
     and any not in a zip are fetched one by one.
-    Keywords match the description, title, vendor and product (OR-ed); CPEs
-    match only where the CNA supplied them, which many do not.
+    Keywords match the description, title, vendor and product, URLs match
+    reference links (e.g. "nodejs.org/en/blog/vulnerability" finds CVEs in
+    libraries Node.js bundles), all OR-ed; CPEs match only where the CNA
+    supplied them, which many do not.
     """
     end = now_utc()
     if since:
@@ -827,7 +831,8 @@ def fetch_cvelist_recent(
 
     keywords = [keyword] if isinstance(keyword, str) else list(keyword or [])
     cpes = [cpe] if isinstance(cpe, str) else list(cpe or [])
-    if keywords or cpes:
+    urls = [u.lower() for u in ([url] if isinstance(url, str) else list(url or []))]
+    if keywords or cpes or urls:
         wanted_kw = [k.lower() for k in keywords]
         wanted_cpe = {":".join(_cpe_match_string(c).split(":")[:5]) for c in cpes}
 
@@ -836,8 +841,10 @@ def fetch_cvelist_recent(
                 [i["description"], i["title"] or ""]
                 + [f"{a['vendor']} {a['product']}" for a in i["affected"]]
             ).lower()
-            return any(k in text for k in wanted_kw) or any(
-                _cpe_match_string(p) in wanted_cpe for p in i["affected_products"]
+            return (
+                any(k in text for k in wanted_kw)
+                or any(_cpe_match_string(p) in wanted_cpe for p in i["affected_products"])
+                or any(u in ref.lower() for u in urls for ref in i["references"])
             )
 
         items = [i for i in items if matches(i)]

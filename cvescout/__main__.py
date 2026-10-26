@@ -21,6 +21,9 @@ def _risk_tag(item: dict) -> str:
 
 
 def _feed(args: argparse.Namespace) -> int:
+    if args.url and not args.cvelist:
+        print("error: --url works only with --cvelist", file=sys.stderr)
+        return 1
     by_risk = args.sort == "risk"
     # Ranking by risk needs every match, not just the newest `limit`
     fetch_limit = 100_000 if by_risk else args.limit
@@ -49,6 +52,7 @@ def _feed(args: argparse.Namespace) -> int:
         else:
             fetch = sources.fetch_cvelist_recent if args.cvelist else sources.fetch_nvd_recent
             data = fetch(
+                **({"url": args.url} if args.cvelist else {}),
                 days=args.days,
                 keyword=args.keyword,
                 min_severity=args.severity,
@@ -203,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument(
         "--cpe", action="append", metavar="VENDOR:PRODUCT",
         help="NVD exact product, e.g. haxx:curl or nodejs:node.js; repeat for OR",
+    )
+    feed.add_argument(
+        "--url", action="append", metavar="TEXT",
+        help="--cvelist: part of a reference link, e.g. nodejs.org/en/blog/vulnerability; repeat for OR",
     )
     feed.add_argument("--severity", choices=list(sources.SEVERITY_ORDER), help="minimum severity")
     feed.add_argument("--min-score", type=float, metavar="N", help="minimum CVSS base score, e.g. 8")

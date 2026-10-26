@@ -665,3 +665,24 @@ def test_feed_sort_risk_ranks_all_matches_before_limit(monkeypatch, capsys):
     out = capsys.readouterr().out.splitlines()
     assert seen["limit"] > 1
     assert len(out) == 2 and "CVE-2026-2" in out[1] and "critical" in out[1]
+
+
+def test_cvelist_url_matches_reference_links(monkeypatch):
+    brotli = _rec("CVE-2026-1497", "2026-10-26T09:00:00.000Z", product="Brotli", desc="Overflow in the Brotli decoder")
+    brotli["containers"]["cna"]["references"].append(
+        {"url": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases#brotli"}
+    )
+    _fake_cvelist(monkeypatch, {
+        "2026-10-25_delta_CVEs_at_end_of_day.zip": _zip(),
+        "latest.zip": _zip(brotli, _rec("CVE-2026-1498", "2026-10-26T10:00:00.000Z")),
+    })
+    data = sources.fetch_cvelist_recent(days=1, keyword="node.js", url="NodeJS.org/en/blog/vulnerability")
+    assert [c["id"] for c in data["cves"]] == ["CVE-2026-1497"]
+    assert sources.fetch_cvelist_recent(days=1, keyword="node.js")["cves"] == []
+
+
+def test_feed_url_requires_cvelist(capsys):
+    from cvescout.__main__ import main
+
+    assert main(["feed", "--url", "nodejs.org"]) == 1
+    assert "--cvelist" in capsys.readouterr().err
