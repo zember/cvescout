@@ -1,0 +1,188 @@
+"""Tools exposed to the agent. Each returns JSON and records the CVE IDs it returned,
+so the agent's final answer can be checked against data actually fetched."""
+
+from __future__ import annotations
+
+import json
+from typing import Literal
+
+from anthropic import beta_tool
+
+from . import sources
+
+# CVE IDs returned by any tool during the current run (see agent.find_unsourced_cves)
+seen_cve_ids: set[str] = set()
+
+
+def _result(payload: dict, ids: list[str]) -> str:
+    seen_cve_ids.update(ids)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _error(e: Exception) -> str:
+    return json.dumps(
+        {"error": f"Source unavailable: {e}. Do not substitute CVEs from memory."}
+    )
+
+
+@beta_tool
+def get_current_datetime() -> str:
+    """Return the current date and time in UTC. Call this first: "latest" and "recent" are relative to this date, not to your training data."""
+    now = sources.now_utc()
+    return json.dumps({"utc_now": now.isoformat(), "date": now.date().isoformat()})
+
+
+@beta_tool
+def search_recent_cves(
+    days: int = 7,
+    keywords: list[str] | None = None,
+    min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None,
+    limit: int = 25,
+    min_score: float | None = None,
+    rce_only: bool = False,
+    match_any: bool = False,
+    poc_only: bool = False,
+    since: str | None = None,
+    cpes: list[str] | None = None,
+) -> str:
+    """Search the NVD for CVEs published in the last N days (or since a date), newest first, enriched with EPSS exploit probability and CISA KEV membership.
+
+    Args:
+        days: Look-back window in days. Use small windows (1-7) for "latest". Ignored when `since` is set.
+        keywords: Optional free-text filters, OR-ed (one search each), e.g. ["openssl"] or ["node.js", "curl"]. Matches anywhere in the description, so it is broad.
+        since: Optional start date YYYY-MM-DD for historical questions ("since 2020"). Ranges over 120 days require keywords or cpes.
+        cpes: Optional exact products as CPE names, OR-ed: "vendor:product" for applications, "o:vendor:product" for operating systems, e.g. ["nodejs:node.js", "haxx:curl", "o:linux:linux_kernel"]. Use find_cpe_name if unsure. More precise than keywords but only covers CVEs NVD has already analyzed.
+        min_severity: Optional minimum CVSS severity.
+        limit: Maximum number of CVEs to return (1-100).
+        min_score: Optional minimum CVSS base score (0-10), e.g. 8.
+        rce_only: Only remote code execution (code/command injection reachable over the network; heuristic on CWE, description and CVSS vector).
+        match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
+        poc_only: Only items with a known public exploit or active exploitation (NVD "Exploit" references, CISA SSVC, CVSS v4 exploit maturity, CISA KEV).
+    """
+    try:
+        data = sources.fetch_nvd_recent(
+            days=days,
+            keyword=keywords,
+            min_severity=min_severity,
+            limit=max(1, min(limit, 100)),
+            min_score=min_score,
+            rce=rce_only,
+            match_any=match_any,
+            poc=poc_only,
+            since=since,
+            cpe=cpes,
+        )
+        sources.enrich(data["cves"])
+    except sources.SourceError as e:
+        return _error(e)
+    for c in data["cves"]:
+        c["description"] = c["description"][:600]
+    return _result(data, [c["id"] for c in data["cves"]])
+
+
+@beta_tool
+def find_cpe_name(product: str) -> str:
+    """Look up the exact NVD CPE name ("vendor:product", or "o:vendor:product" for operating systems) for a product, to pass in search_recent_cves(cpes=...). Products whose name matches best come first; deprecated names show their replacement.
+
+    Args:
+        product: Product name, e.g. "curl", "node.js", "apache http server", "linux kernel".
+    """
+    try:
+        return json.dumps(sources.find_cpe(product, limit=10), ensure_ascii=False)
+    except sources.SourceError as e:
+        return _error(e)
+
+
+@beta_tool
+def get_cve_details(cve_id: str) -> str:
+    """Fetch full, current details of one CVE from the NVD, with EPSS, CISA KEV status and any GitHub advisories (affected packages and patched versions).
+
+    Args:
+        cve_id: CVE identifier, e.g. "CVE-2026-12345".
+    """
+    try:
+        cve = sources.fetch_nvd_cve(cve_id)
+        if cve is None:
+            return json.dumps({"error": f"{cve_id} not found in NVD."})
+        sources.enrich([cve])
+    except sources.SourceError as e:
+        return _error(e)
+    try:
+        cve["github_advisories"] = sources.fetch_ghsa_for_cve(cve["id"])
+    except sources.SourceError as e:
+        cve["github_advisories"] = f"unavailable: {e}"
+    return _result(cve, [cve["id"]])
+
+
+@beta_tool
+def search_github_advisories(
+    days: int = 7,
+    ecosystem: Literal[
+        "actions", "composer", "erlang", "go", "maven", "npm", "nuget",
+        "other", "pip", "pub", "rubygems", "rust", "swift",
+    ] | None = None,
+    package: str | None = None,
+    min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None,
+    include_unreviewed: bool = False,
+    limit: int = 25,
+    min_score: float | None = None,
+    rce_only: bool = False,
+    match_any: bool = False,
+    poc_only: bool = False,
+) -> str:
+    """Search the GitHub Advisory Database for security advisories published in the last N days, newest first. Best source for open-source dependencies: each reviewed advisory names the package, vulnerable version range and first patched version. Some advisories have no CVE ID (only a GHSA ID).
+
+    Args:
+        days: Look-back window in days.
+        ecosystem: Optional package ecosystem filter (pip = Python, npm = JavaScript, maven = Java, rust = crates.io, ...).
+        package: Optional package name, e.g. "lodash" or "django".
+        min_severity: Optional minimum severity.
+        include_unreviewed: Also include advisories not yet reviewed by GitHub (usually NVD mirrors without package data).
+        limit: Maximum number of advisories to return (1-100).
+        min_score: Optional minimum CVSS base score (0-10), e.g. 8.
+        rce_only: Only remote code execution (code/command injection reachable over the network; heuristic on CWE, description and CVSS vector).
+        match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
+        poc_only: Only items with a known public exploit or active exploitation (NVD "Exploit" references, CISA SSVC, CVSS v4 exploit maturity, CISA KEV).
+    """
+    try:
+        data = sources.fetch_ghsa_recent(
+            days=days,
+            ecosystem=ecosystem,
+            package=package,
+            min_severity=min_severity,
+            include_unreviewed=include_unreviewed,
+            limit=max(1, min(limit, 100)),
+            min_score=min_score,
+            rce=rce_only,
+            match_any=match_any,
+            poc=poc_only,
+        )
+        sources.enrich(data["advisories"], key="cve_id")
+    except sources.SourceError as e:
+        return _error(e)
+    return _result(data, [a["cve_id"] for a in data["advisories"] if a["cve_id"]])
+
+
+@beta_tool
+def get_recent_exploited(days: int = 30, limit: int = 50) -> str:
+    """List vulnerabilities CISA added to its Known Exploited Vulnerabilities (KEV) catalog in the last N days - CVEs confirmed exploited in the wild. Note: an old CVE can be newly added here; report its date_added.
+
+    Args:
+        days: Look-back window in days.
+        limit: Maximum number of entries to return.
+    """
+    try:
+        data = sources.fetch_kev_recent(days=days, limit=max(1, min(limit, 200)))
+    except sources.SourceError as e:
+        return _error(e)
+    return _result(data, [v["id"] for v in data["vulnerabilities"]])
+
+
+ALL_TOOLS = [
+    get_current_datetime,
+    search_recent_cves,
+    search_github_advisories,
+    find_cpe_name,
+    get_cve_details,
+    get_recent_exploited,
+]
