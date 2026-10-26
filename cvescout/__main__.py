@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     cpe.add_argument("--json", action="store_true")
     cpe.set_defaults(func=_cpe)
 
-    ask = sub.add_parser("ask", help="ask the agent (requires Anthropic credentials)")
+    ask = sub.add_parser("ask", help="ask the built-in agent (needs Claude API credentials; in Codex or Claude Code use `mcp` instead)")
     ask.add_argument("question", nargs="+")
     ask.add_argument("-v", "--verbose", action="store_true", help="show tool calls")
     ask.set_defaults(func=_ask)
