@@ -20,8 +20,8 @@ Dlaczego: model językowy zna tylko CVE sprzed swojej daty odcięcia wiedzy, wi�
 
 Agent (`claude-opus-5-5`) ma narzędzia do tych źródeł, prompt zakazujący cytowania CVE z pamięci oraz twardy
 post-check: każde CVE w odpowiedzi, którego nie zwróciło żadne narzędzie, jest oznaczane ostrzeżeniem.
-Te same narzędzia udostępnia [serwer MCP](#serwer-mcp) – wtedy agentem jest Claude Code, Claude Desktop
-lub Twój własny agent, bez osobnego klucza API.
+Te same narzędzia udostępnia [serwer MCP](#serwer-mcp) – wtedy agentem jest Claude Code, Claude Desktop,
+Codex lub Twój własny agent, bez osobnego klucza API.
 
 ## Instalacja
 
@@ -320,6 +320,29 @@ Windows: `%APPDATA%\Claude\`):
 
 Na Windows `"command": "C:\\sciezka\\do\\cvescout\\.venv\\Scripts\\cvescout.exe"`. Klucze `NVD_API_KEY` i `GITHUB_TOKEN`
 można przekazać w polu `"env"` tej samej sekcji (albo `claude mcp add -e NVD_API_KEY=...`).
+
+**OpenAI Codex CLI:**
+
+```bash
+codex mcp add cvescout -- "$PWD/.venv/bin/cvescout" mcp
+```
+
+```bat
+codex mcp add cvescout -- C:\sciezka\do\cvescout\.venv\Scripts\cvescout.exe mcp
+```
+
+Klucze przekażesz przez `--env NVD_API_KEY=...`. Długie zapytania do NVD (duże produkty z kilku lat, bez `NVD_API_KEY`)
+mogą trwać minuty, dłużej niż domyślny limit czasu narzędzia w Codexie, więc wydłuż go w `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.cvescout]
+command = "/Users/ty/dev/cvescout/.venv/bin/cvescout"
+args = ["mcp"]
+tool_timeout_sec = 300
+```
+
+Serwer działa z każdym klientem MCP obsługującym stdio; sprawdzony z wersjami protokołu od 2025-03-26 do bieżącej.
+To, jak ściśle klient trzyma się instrukcji serwera (bez CVE z pamięci), zależy od klienta.
 
 **Własny agent (Python):**
 

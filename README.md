@@ -21,7 +21,7 @@ lists old ones. `cvescout` fetches the data at query time, in a time window coun
 
 The agent (`claude-opus-5-5`) has tools for these sources, a prompt that forbids citing CVEs from memory, and a hard
 post-check: any CVE in its answer that no tool returned is flagged with a warning. The same tools are exposed by the
-[MCP server](#mcp-server), so Claude Code, Claude Desktop or your own agent can use them without a separate API key.
+[MCP server](#mcp-server), so Claude Code, Claude Desktop, Codex or your own agent can use them without a separate API key.
 
 ## Installation
 
@@ -322,6 +322,29 @@ Windows: `%APPDATA%\Claude\`):
 
 On Windows use `"command": "C:\\path\\to\\cvescout\\.venv\\Scripts\\cvescout.exe"`. `NVD_API_KEY` and `GITHUB_TOKEN`
 can be passed in an `"env"` field of the same section (or with `claude mcp add -e NVD_API_KEY=...`).
+
+**OpenAI Codex CLI:**
+
+```bash
+codex mcp add cvescout -- "$PWD/.venv/bin/cvescout" mcp
+```
+
+```bat
+codex mcp add cvescout -- C:\path\to\cvescout\.venv\Scripts\cvescout.exe mcp
+```
+
+Keys go in with `--env NVD_API_KEY=...`. Long NVD queries (large products over several years, without `NVD_API_KEY`)
+can take minutes, longer than Codex's default tool timeout, so raise it in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.cvescout]
+command = "/Users/you/dev/cvescout/.venv/bin/cvescout"
+args = ["mcp"]
+tool_timeout_sec = 300
+```
+
+The server works with any MCP client that speaks stdio; it was checked with protocol versions 2025-03-26 through the
+current one. How strictly a client follows the server's instructions (no CVEs from memory) depends on the client.
 
 **Your own agent (Python):**
 
