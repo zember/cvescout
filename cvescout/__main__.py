@@ -1,4 +1,5 @@
-"""CLI: `python -m cvescout feed ...` (no LLM) and `python -m cvescout ask "..."` (agent)."""
+"""CLI: `python -m cvescout feed ...` (no LLM), `python -m cvescout ask "..."` (agent)
+and `python -m cvescout mcp` (MCP server for other agents)."""
 
 from __future__ import annotations
 
@@ -37,7 +38,8 @@ def _feed(args: argparse.Namespace) -> int:
             if args.enrich:
                 sources.enrich(data["advisories"], key="cve_id")
         else:
-            data = sources.fetch_nvd_recent(
+            fetch = sources.fetch_cvelist_recent if args.cvelist else sources.fetch_nvd_recent
+            data = fetch(
                 days=args.days,
                 keyword=args.keyword,
                 min_severity=args.severity,
@@ -80,10 +82,13 @@ def _feed(args: argparse.Namespace) -> int:
             )
         return 0
 
+    name = f"CVE List (data as of {data['data_as_of']})" if args.cvelist else "NVD"
     print(
-        f"NVD {data['window_start'][:16]} -> {data['window_end'][:16]} UTC: "
+        f"{name} {data['window_start'][:16]} -> {data['window_end'][:16]} UTC: "
         f"{data['published_in_window']} published, {data['matching']} matching, showing {len(data['cves'])}"
     )
+    if data.get("missing_days"):
+        print(f"warning: no CVE List file for {', '.join(data['missing_days'])}", file=sys.stderr)
     for c in data["cves"]:
         score = f"{c['cvss_score']:>4}" if c["cvss_score"] is not None else "   -"
         sev = (c["severity"] or "N/A")[:8]
@@ -132,6 +137,13 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mcp(args: argparse.Namespace) -> int:
+    from .mcp_server import server
+
+    server.run()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cvescout", description="Find the latest CVEs from live sources.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -153,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     source = feed.add_mutually_exclusive_group()
     source.add_argument("--kev", action="store_true", help="CISA Known Exploited Vulnerabilities instead of NVD")
     source.add_argument("--ghsa", action="store_true", help="GitHub Advisory Database instead of NVD")
+    source.add_argument(
+        "--cvelist", action="store_true",
+        help="CVEProject CVE List instead of NVD: last 30 days, no rate limit, about an hour ahead of NVD",
+    )
     feed.add_argument("--ecosystem", choices=sources.GHSA_ECOSYSTEMS, help="GHSA: package ecosystem")
     feed.add_argument("--package", help="GHSA: package name, e.g. lodash")
     feed.add_argument("--unreviewed", action="store_true", help="GHSA: include unreviewed advisories")
@@ -170,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("question", nargs="+")
     ask.add_argument("-v", "--verbose", action="store_true", help="show tool calls")
     ask.set_defaults(func=_ask)
+
+    mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop and other agents")
+    mcp.set_defaults(func=_mcp)
 
     args = parser.parse_args(argv)
     return args.func(args)

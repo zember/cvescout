@@ -44,10 +44,12 @@ def search_recent_cves(
     poc_only: bool = False,
     since: str | None = None,
     cpes: list[str] | None = None,
+    source: Literal["nvd", "cvelist"] = "nvd",
 ) -> str:
-    """Search the NVD for CVEs published in the last N days (or since a date), newest first, enriched with EPSS exploit probability and CISA KEV membership.
+    """Search for CVEs published in the last N days (or since a date), newest first, enriched with EPSS exploit probability and CISA KEV membership.
 
     Args:
+        source: "nvd" (default; NVD API, any date range, CPE filters cover NVD-analyzed CVEs) or "cvelist" (CVEProject CVE List: last 30 days only, no rate limit, CVEs appear about an hour before NVD, includes vendor-supplied affected versions; keywords also match vendor and product names; CPE filters only match where the vendor supplied CPEs). Use "cvelist" for the last hours or days, or when NVD is unavailable or slow.
         days: Look-back window in days. Use small windows (1-7) for "latest". Ignored when `since` is set.
         keywords: Optional free-text filters, OR-ed (one search each), e.g. ["openssl"] or ["node.js", "curl"]. Matches anywhere in the description, so it is broad.
         since: Optional start date YYYY-MM-DD for historical questions ("since 2020"). Ranges over 120 days require keywords or cpes.
@@ -59,8 +61,9 @@ def search_recent_cves(
         match_any: If true, keep items meeting ANY of min_severity/min_score/rce_only/poc_only instead of ALL of them.
         poc_only: Only items with a known public exploit or active exploitation (NVD "Exploit" references, CISA SSVC, CVSS v4 exploit maturity, CISA KEV).
     """
+    fetch = sources.fetch_cvelist_recent if source == "cvelist" else sources.fetch_nvd_recent
     try:
-        data = sources.fetch_nvd_recent(
+        data = fetch(
             days=days,
             keyword=keywords,
             min_severity=min_severity,
@@ -95,18 +98,32 @@ def find_cpe_name(product: str) -> str:
 
 @beta_tool
 def get_cve_details(cve_id: str) -> str:
-    """Fetch full, current details of one CVE from the NVD, with EPSS, CISA KEV status and any GitHub advisories (affected packages and patched versions).
+    """Fetch full, current details of one CVE from the NVD, with the vendor's affected versions from the CVE List, EPSS, CISA KEV status and any GitHub advisories (affected packages and patched versions). Falls back to the CVE List when NVD is unavailable or does not have the CVE yet.
 
     Args:
         cve_id: CVE identifier, e.g. "CVE-2026-12345".
     """
     try:
-        cve = sources.fetch_nvd_cve(cve_id)
-        if cve is None:
-            return json.dumps({"error": f"{cve_id} not found in NVD."})
-        sources.enrich([cve])
+        cvelist = sources.fetch_cvelist_cve(cve_id)
     except sources.SourceError as e:
-        return _error(e)
+        cvelist, cvelist_error = None, e
+    else:
+        cvelist_error = None
+    try:
+        cve = sources.fetch_nvd_cve(cve_id)
+    except sources.SourceError as e:
+        if cvelist is None:
+            return _error(e)
+        cve, cvelist["note"] = cvelist, f"NVD unavailable ({e}); data from the CVE List."
+    if cve is None:
+        if cvelist is None:
+            return json.dumps({"error": f"{cve_id} not found in NVD or the CVE List."})
+        cve, cvelist["note"] = cvelist, "Not in NVD yet; data from the CVE List."
+    elif cvelist:
+        cve["affected"] = cvelist["affected"]
+    elif cvelist_error:
+        cve["affected"] = f"unavailable: {cvelist_error}"
+    sources.enrich([cve])
     try:
         cve["github_advisories"] = sources.fetch_ghsa_for_cve(cve["id"])
     except sources.SourceError as e:

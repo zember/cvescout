@@ -1,4 +1,4 @@
-"""Live CVE data sources: NVD API 2.0, GitHub Advisory Database, CISA KEV and FIRST EPSS.
+"""Live CVE data sources: NVD API 2.0, CVE List V5, GitHub Advisory Database, CISA KEV and FIRST EPSS.
 
 Everything here is fetched at call time, relative to the current UTC date,
 so results never depend on what a language model remembers.
@@ -6,6 +6,7 @@ so results never depend on what a language model remembers.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -13,13 +14,20 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_CPE_URL = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EPSS_URL = "https://api.first.org/data/v1/epss"
 GHSA_URL = "https://api.github.com/advisories"
+CVELIST_REPO = "CVEProject/cvelistV5"
+CVELIST_RAW_URL = f"https://raw.githubusercontent.com/{CVELIST_REPO}/main/cves"
+CVELIST_RELEASES_URL = f"https://github.com/{CVELIST_REPO}/releases/download"
+CVELIST_LATEST_URL = f"https://api.github.com/repos/{CVELIST_REPO}/releases/latest"
+CVELIST_DELTALOG_URL = f"{CVELIST_RAW_URL}/deltaLog.json"
 
 NVD_MAX_WINDOW_DAYS = 120  # NVD rejects pubStartDate/pubEndDate ranges longer than this
 NVD_PAGE_SIZE = 2000
@@ -27,6 +35,7 @@ NVD_MAX_PAGES = 15
 SEVERITY_ORDER = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 CACHE_TTL = 600
+# url -> (monotonic expiry time, parsed response)
 _cache: dict[str, tuple[float, object]] = {}
 _last_nvd_request = 0.0
 
@@ -45,7 +54,40 @@ def _nvd_timestamp(dt: datetime) -> str:
 
 def _is_cached(url: str) -> bool:
     cached = _cache.get(url)
-    return cached is not None and time.monotonic() - cached[0] < CACHE_TTL
+    return cached is not None and time.monotonic() < cached[0]
+
+
+def _get(
+    url: str,
+    parse,
+    headers: dict[str, str] | None = None,
+    retries: int = 3,
+    retry_on: tuple[int, ...] = (403, 429, 500, 502, 503, 504),
+    ttl: float = CACHE_TTL,
+):
+    """Download `url`, return parse(body) and cache it for `ttl` seconds."""
+    if _is_cached(url):
+        return _cache[url][1]
+
+    req = urllib.request.Request(url, headers={"User-Agent": "cvescout/0.1", **(headers or {})})
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = parse(resp.read())
+            _cache[url] = (time.monotonic() + ttl, data)
+            return data
+        except urllib.error.HTTPError as e:
+            # NVD answers 403/429 when rate limited and 503 when overloaded
+            if e.code in retry_on and attempt < retries:
+                time.sleep(6 * (attempt + 1))
+                continue
+            raise SourceError(f"{urllib.parse.urlsplit(url).netloc}: HTTP {e.code}") from e
+        except (urllib.error.URLError, TimeoutError, ValueError, zipfile.BadZipFile) as e:
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise SourceError(f"{urllib.parse.urlsplit(url).netloc}: {e}") from e
+    raise AssertionError("unreachable")
 
 
 def _get_json(
@@ -54,28 +96,7 @@ def _get_json(
     retries: int = 3,
     retry_on: tuple[int, ...] = (403, 429, 500, 502, 503, 504),
 ) -> dict:
-    if _is_cached(url):
-        return _cache[url][1]  # type: ignore[return-value]
-
-    req = urllib.request.Request(url, headers={"User-Agent": "cvescout/0.1", **(headers or {})})
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.load(resp)
-            _cache[url] = (time.monotonic(), data)
-            return data
-        except urllib.error.HTTPError as e:
-            # NVD answers 403/429 when rate limited and 503 when overloaded
-            if e.code in retry_on and attempt < retries:
-                time.sleep(6 * (attempt + 1))
-                continue
-            raise SourceError(f"{urllib.parse.urlsplit(url).netloc}: HTTP {e.code}") from e
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            if attempt < retries:
-                time.sleep(2 * (attempt + 1))
-                continue
-            raise SourceError(f"{urllib.parse.urlsplit(url).netloc}: {e}") from e
-    raise AssertionError("unreachable")
+    return _get(url, json.loads, headers, retries, retry_on)
 
 
 def _nvd_get(params: dict[str, str | int], base: str = NVD_URL) -> dict:
@@ -445,13 +466,10 @@ GHSA_ECOSYSTEMS = (
 
 def _ghsa_get(params: dict[str, str | int]) -> list[dict]:
     """Call the GitHub Advisory API (60 req/h anonymously, 5000/h with GITHUB_TOKEN)."""
-    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if token := os.environ.get("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {token}"
     url = f"{GHSA_URL}?{urllib.parse.urlencode(params)}"
     try:
         # 403/429 here means the hourly quota is spent; retrying within seconds won't help
-        return _get_json(url, headers=headers, retry_on=(500, 502, 503, 504))  # type: ignore[return-value]
+        return _get_json(url, headers=_github_headers(), retry_on=(500, 502, 503, 504))  # type: ignore[return-value]
     except SourceError as e:
         if "HTTP 403" in str(e) or "HTTP 429" in str(e):
             raise SourceError(f"{e} (GitHub rate limit; set GITHUB_TOKEN to raise it)") from e
@@ -561,6 +579,298 @@ def fetch_ghsa_recent(
 def fetch_ghsa_for_cve(cve_id: str) -> list[dict]:
     """GitHub advisories (affected packages, patched versions) for one CVE."""
     return [normalize_ghsa(a) for a in _ghsa_get({"cve_id": cve_id.strip().upper()})]
+
+
+CVELIST_MAX_DAYS = 30
+CVSS_KEYS = ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0")
+
+
+def _v2_severity(score: float | None) -> str | None:
+    """CVSS v2 records carry no severity label; derive it as NVD does."""
+    if score is None:
+        return None
+    return "HIGH" if score >= 7 else "MEDIUM" if score >= 4 else "LOW"
+
+
+def _version_range(v: dict) -> str:
+    start = v.get("version") or ""
+    if v.get("lessThan"):
+        return f"{start} - <{v['lessThan']}" if start not in ("", "0") else f"<{v['lessThan']}"
+    if v.get("lessThanOrEqual"):
+        return f"{start} - <={v['lessThanOrEqual']}" if start not in ("", "0") else f"<={v['lessThanOrEqual']}"
+    return start
+
+
+def normalize_cvelist(record: dict) -> dict:
+    """CVE List V5 record -> the same shape as normalize_nvd, plus `title` and `affected`.
+
+    Data comes from the CNA (the vendor or other assigner) and from ADP
+    containers, notably CISA's Vulnrichment (SSVC exploitation, KEV, CVSS
+    when the CNA gave none). NVD analysis is not part of these records.
+    """
+    meta = record["cveMetadata"]
+    cna = record.get("containers", {}).get("cna", {})
+    containers = [cna, *record.get("containers", {}).get("adp", [])]
+
+    description = next(
+        (d["value"] for d in cna.get("descriptions", []) if d.get("lang", "").startswith("en")),
+        next((d["value"] for d in cna.get("rejectedReasons", [])), ""),
+    )
+
+    score = severity = vector = version = None
+    for key in CVSS_KEYS:  # newest CVSS version first, the CNA's before ADP's
+        data = next((m[key] for c in containers for m in c.get("metrics", []) if key in m), None)
+        if data:
+            score, vector, version = data.get("baseScore"), data.get("vectorString"), data.get("version")
+            severity = data.get("baseSeverity") or _v2_severity(score)
+            break
+
+    cwes = sorted(
+        {
+            d["cweId"]
+            for c in containers
+            for p in c.get("problemTypes", [])
+            for d in p.get("descriptions", [])
+            if d.get("cweId", "").startswith("CWE-")
+        }
+    )
+
+    refs: dict[str, set[str]] = {}
+    for c in containers:
+        for r in c.get("references", []):
+            refs.setdefault(r["url"], set()).update(r.get("tags") or [])
+    exploit_refs = [url for url, tags in refs.items() if "exploit" in tags]
+
+    status = "poc" if exploit_refs else None
+
+    def bump(new: str) -> None:
+        nonlocal status
+        if EXPLOIT_RANK[new] > EXPLOIT_RANK.get(status or "", 0):
+            status = new
+
+    for c in containers:
+        for m in c.get("metrics", []):
+            other = m.get("other", {})
+            if other.get("type") == "kev":
+                bump("active")
+            elif other.get("type") == "ssvc":
+                for option in other.get("content", {}).get("options", []):
+                    if option.get("Exploitation") in EXPLOIT_RANK:
+                        bump(option["Exploitation"])
+    if vector and "/E:A" in vector:
+        bump("active")
+    elif vector and "/E:P" in vector:
+        bump("poc")
+
+    products, affected = set(), []
+    for c in containers:
+        for applicability in c.get("cpeApplicability", []):
+            for node in applicability.get("nodes", []):
+                for match in node.get("cpeMatch", []):
+                    fields = match.get("criteria", "").split(":")
+                    if match.get("vulnerable") and len(fields) > 4:
+                        products.add(_cpe_shorthand(fields[2], fields[3], fields[4]))
+        for a in c.get("affected", []):
+            for cpe in a.get("cpes", []):
+                fields = cpe.split(":")
+                if len(fields) > 4:
+                    products.add(_cpe_shorthand(fields[2], fields[3], fields[4]))
+    for a in cna.get("affected", []):
+        entry = {
+            "vendor": a.get("vendor") or a.get("collectionURL"),
+            "product": a.get("product") or a.get("packageName"),
+            "versions": [_version_range(v) for v in a.get("versions", []) if v.get("status") == "affected"][:5],
+        }
+        if entry not in affected:
+            affected.append(entry)
+
+    return {
+        "id": meta["cveId"],
+        "published": meta.get("datePublished"),
+        "last_modified": meta.get("dateUpdated"),
+        "status": meta.get("state"),
+        "title": cna.get("title"),
+        "description": description,
+        "cvss_score": score,
+        "severity": severity,
+        "cvss_version": version,
+        "vector": vector,
+        "cwe": cwes,
+        "rce": is_rce(description, cwes, vector),
+        "exploit": status,
+        "exploit_refs": exploit_refs[:5],
+        "affected_products": sorted(products),
+        "affected": affected[:10],
+        "references": list(refs)[:5],
+        "url": f"https://www.cve.org/CVERecord?id={meta['cveId']}",
+        "nvd_url": f"https://nvd.nist.gov/vuln/detail/{meta['cveId']}",
+    }
+
+
+def _cvelist_zip(url: str, keep_since: str, ttl: float) -> list[dict]:
+    """Normalized records from a cvelistV5 release zip, published at or after `keep_since`."""
+
+    def parse(body: bytes) -> list[dict]:
+        items = []
+        with zipfile.ZipFile(io.BytesIO(body)) as z:
+            for name in z.namelist():
+                if not name.endswith(".json"):
+                    continue
+                record = json.loads(z.read(name))
+                meta = record.get("cveMetadata", {})
+                if meta.get("state") == "PUBLISHED" and meta.get("datePublished", "") >= keep_since:
+                    items.append(normalize_cvelist(record))
+        return items
+
+    return _get(url, parse, retry_on=(500, 502, 503, 504), ttl=ttl)
+
+
+def _github_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def fetch_cvelist_recent(
+    days: float = 2,
+    keyword: str | list[str] | None = None,
+    min_severity: str | None = None,
+    limit: int = 50,
+    min_score: float | None = None,
+    rce: bool = False,
+    match_any: bool = False,
+    since: str | None = None,
+    cpe: str | list[str] | None = None,
+    poc: bool = False,
+) -> dict:
+    """CVEs published in the last `days` days (at most 30), newest first, from the CVE List.
+
+    CVEProject/cvelistV5 publishes a zip of every record changed each day
+    (cumulative, hourly for today). Downloading those is a few MB per day and
+    has no rate limit, unlike NVD; records show up minutes after publication.
+    The zips miss records published shortly after midnight UTC, before the
+    day's baseline is cut, so the 30-day delta log is checked for new IDs
+    and any not in a zip are fetched one by one.
+    Keywords match the description, title, vendor and product (OR-ed); CPEs
+    match only where the CNA supplied them, which many do not.
+    """
+    end = now_utc()
+    if since:
+        start = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+    else:
+        start = end - timedelta(days=max(days, 1 / 24))
+    if end - start > timedelta(days=CVELIST_MAX_DAYS, hours=1):
+        raise SourceError(
+            f"CVE List daily files cover at most {CVELIST_MAX_DAYS} days; use NVD for longer ranges"
+        )
+
+    # Keep later versions of records published in the window (e.g. CISA adding KEV/SSVC)
+    keep_since = (start - timedelta(days=1)).strftime("%Y-%m-%d")
+    latest = _get_json(CVELIST_LATEST_URL, headers=_github_headers())
+    latest_asset = next(
+        (a for a in latest.get("assets", []) if "_delta_CVEs_at_" in a["name"]), None
+    )
+    if latest_asset is None:
+        raise SourceError(f"github.com: no delta file in cvelistV5 release {latest.get('tag_name')}")
+    latest_day = latest_asset["name"][:10]
+
+    urls: list[tuple[str, float]] = []
+    day = start.date()
+    while day.isoformat() < latest_day:
+        d = day.isoformat()
+        # Finished days never change, so keep them cached for a day
+        urls.append((f"{CVELIST_RELEASES_URL}/cve_{d}_at_end_of_day/{d}_delta_CVEs_at_end_of_day.zip", 86400))
+        day += timedelta(days=1)
+    urls.append((latest_asset["browser_download_url"], CACHE_TTL))
+
+    missing: list[str] = []
+
+    def download(entry: tuple[str, float]) -> list[dict]:
+        url, ttl = entry
+        try:
+            return _cvelist_zip(url, keep_since, ttl)
+        except SourceError as e:
+            if "HTTP 404" not in str(e):
+                raise
+            missing.append(url.rsplit("/", 1)[-1][:10])
+            return []
+
+    found: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for items in pool.map(download, urls):
+            for item in items:
+                current = found.get(item["id"])
+                if current is None or (item["last_modified"] or "") > (current["last_modified"] or ""):
+                    found[item["id"]] = item
+
+    start_str = start.strftime("%Y-%m-%dT%H:%M:%S")
+    log = _get_json(CVELIST_DELTALOG_URL)
+    unzipped = {
+        x["cveId"]
+        for entry in log
+        for x in entry.get("new", [])
+        if x.get("dateUpdated", "") >= start_str and x["cveId"] not in found
+    }
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for item in pool.map(fetch_cvelist_cve, sorted(unzipped)):
+            if item and item["status"] == "PUBLISHED":
+                found[item["id"]] = item
+
+    items = [i for i in found.values() if (i["published"] or "") >= start_str]
+
+    keywords = [keyword] if isinstance(keyword, str) else list(keyword or [])
+    cpes = [cpe] if isinstance(cpe, str) else list(cpe or [])
+    if keywords or cpes:
+        wanted_kw = [k.lower() for k in keywords]
+        wanted_cpe = {":".join(_cpe_match_string(c).split(":")[:5]) for c in cpes}
+
+        def matches(i: dict) -> bool:
+            text = " ".join(
+                [i["description"], i["title"] or ""]
+                + [f"{a['vendor']} {a['product']}" for a in i["affected"]]
+            ).lower()
+            return any(k in text for k in wanted_kw) or any(
+                _cpe_match_string(p) in wanted_cpe for p in i["affected_products"]
+            )
+
+        items = [i for i in items if matches(i)]
+
+    in_range = len(items)
+    if poc:
+        mark_kev_exploited(items)
+    items = apply_filters(items, min_severity, min_score, rce, match_any, poc)
+    items.sort(key=lambda i: i["published"] or "", reverse=True)
+    return {
+        "source": f"CVE List V5 ({CVELIST_REPO})",
+        "data_as_of": latest.get("tag_name"),
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "missing_days": sorted(missing),
+        "fetched_individually": len(unzipped),
+        "published_in_window": in_range,
+        "matching": len(items),
+        "cves": items[:limit],
+    }
+
+
+def cvelist_record_url(cve_id: str) -> str:
+    """Raw cvelistV5 path: CVE-2026-104596 -> cves/2026/104xxx/CVE-2026-104596.json."""
+    m = re.fullmatch(r"CVE-(\d{4})-(\d{4,})", cve_id.strip().upper())
+    if not m:
+        raise SourceError(f"not a CVE ID: {cve_id!r}")
+    year, number = m.groups()
+    return f"{CVELIST_RAW_URL}/{year}/{int(number) // 1000}xxx/CVE-{year}-{number}.json"
+
+
+def fetch_cvelist_cve(cve_id: str) -> dict | None:
+    """One CVE as published by its CNA, straight from the CVE List (no NVD rate limit)."""
+    try:
+        return normalize_cvelist(_get_json(cvelist_record_url(cve_id)))
+    except SourceError as e:
+        if "HTTP 404" in str(e):
+            return None
+        raise
 
 
 def fetch_kev_catalog() -> dict:

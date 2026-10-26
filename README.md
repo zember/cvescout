@@ -8,12 +8,15 @@ Dlaczego: model językowy zna tylko CVE sprzed swojej daty odcięcia wiedzy, wi�
 | Źródło | Co daje |
 |---|---|
 | [NVD API 2.0](https://nvd.nist.gov/developers/vulnerabilities) | CVE z ostatnich N dni lub od daty, CVSS, CWE, linki do exploitów |
+| [CVE List V5](https://github.com/CVEProject/cvelistV5) | oficjalna lista CVE: ostatnie 30 dni bez limitów zapytań, ok. godzinę przed NVD, wersje podatne od producenta |
 | [GitHub Advisory Database](https://github.com/advisories) | porady dla bibliotek open source: pakiet, podatne wersje, wersja z poprawką |
 | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | podatności aktywnie wykorzystywane (filtr po `dateAdded`) |
 | [FIRST EPSS](https://www.first.org/epss/) | prawdopodobieństwo exploitacji |
 
 Agent (`claude-opus-5-5`) ma narzędzia do tych źródeł, prompt zakazujący cytowania CVE z pamięci oraz twardy
 post-check: każde CVE w odpowiedzi, którego nie zwróciło żadne narzędzie, jest oznaczane ostrzeżeniem.
+Te same narzędzia udostępnia [serwer MCP](#serwer-mcp) – wtedy agentem jest Claude Code, Claude Desktop
+lub Twój własny agent, bez osobnego klucza API.
 
 ## Instalacja
 
@@ -35,7 +38,7 @@ Klucze (wszystkie opcjonalne poza `ANTHROPIC_API_KEY` dla `ask`); w cmd zamiast 
 ```bash
 export NVD_API_KEY=...        # 50 zamiast 5 zapytań / 30 s: https://nvd.nist.gov/developers/request-an-api-key
 export GITHUB_TOKEN=...       # 5000 zamiast 60 zapytań / h do GHSA, np. $(gh auth token)
-export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`)
+export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`); serwer MCP go nie potrzebuje
 ```
 
 ## Uruchamianie bez `activate`
@@ -62,6 +65,7 @@ cvescout feed --days 1 --json
 | `cvescout feed`, `cvescout cpe` | człowiek | tabela: data, ID, CVSS, znaczniki `RCE`/`PoC`/`EXPLOITED`, opis skrócony do 100 znaków |
 | `cvescout feed --json`, `cvescout cpe --json` | skrypty, inne agenty, pipeline'y | pełne dane: cały opis, CWE, wektor CVSS, linki, `exploit_refs`, `affected_products`, EPSS/KEV (z `--enrich`) |
 | `cvescout ask` | człowiek | odpowiedź agenta Claude w języku pytania |
+| `cvescout mcp` | agenty (Claude Code, Claude Desktop, inne klienty MCP) | narzędzia zwracające JSON, jak w `ask` |
 
 Tabela może się zmieniać i ucina dane – programy powinny czytać `--json`. Błędy trafiają na stderr, a kod wyjścia wynosi 1,
 więc skrypt może łatwo wykryć niepowodzenie. Agent wbudowany w `ask` nie czyta tabeli – jego narzędzia dostają JSON bezpośrednio.
@@ -116,6 +120,25 @@ Use: cvescout feed --cpe f5:nginx --since 2020-01-01
 Najpierw są produkty o pasującej nazwie, potem pozostałe. Przy wycofanych nazwach widać, czym je zastąpiono.
 Systemy operacyjne mają prefiks `o:` (np. `o:linux:linux_kernel`), sprzęt `h:`.
 
+### CVE List (CVEProject/cvelistV5)
+
+```bash
+cvescout feed --cvelist --days 1                          # wszystko z ostatnich 24 h, bez limitów NVD
+cvescout feed --cvelist --days 7 --rce --min-score 8      # te same filtry co dla NVD
+cvescout feed --cvelist --days 3 --keyword nginx --json   # słowo w opisie, tytule, nazwie producenta lub produktu
+```
+
+`--cvelist` czyta oficjalną listę CVE zamiast NVD: dzienne paczki zmian z
+[GitHub Releases](https://github.com/CVEProject/cvelistV5/releases) (kilka MB na dzień) uzupełnione indeksem `deltaLog.json`.
+
+- **Szybciej:** tydzień danych pobiera się w kilka sekund, bez limitu 5 zapytań / 30 s; CVE pojawia się tu ok. godzinę przed NVD.
+- **Tylko 30 dni wstecz.** Dla dłuższych zakresów (`--since 2020-01-01`) użyj NVD.
+- **Dane od CNA** (producenta lub innego wydawcy CVE) oraz CISA Vulnrichment (SSVC, KEV), bez analizy NVD:
+  ocena CVSS czasem się różni, a `--cpe` działa tylko, gdy wydawca podał CPE – dla CVE List lepiej użyć `--keyword`.
+- W `--json` każde CVE ma pole `affected`: producent, produkt i podatne wersje (np. `1.0 - <1.4`).
+- `get_cve_details` (agent i MCP) dokłada `affected` z CVE List do danych NVD, a gdy NVD nie działa
+  lub jeszcze nie ma danego CVE, zwraca rekord z CVE List.
+
 ### GitHub Advisory Database
 
 ```bash
@@ -139,6 +162,51 @@ i podaje, które filtry zastosował.
 
 Długie zakresy dla dużych produktów (np. jądro Linux od 2020) wymagają wielu zapytań do NVD –
 bez `NVD_API_KEY` trwa to kilka minut.
+
+## Serwer MCP
+
+`cvescout mcp` uruchamia serwer [MCP](https://modelcontextprotocol.io) (stdio) z tymi samymi narzędziami co agent `ask`:
+`get_current_datetime`, `search_recent_cves` (NVD lub `source="cvelist"`), `search_github_advisories`,
+`find_cpe_name`, `get_cve_details`, `get_recent_exploited`. Serwer nie wywołuje modelu, więc nie potrzebuje `ANTHROPIC_API_KEY` –
+pytania obsługuje klient (np. Claude Code w ramach Twojej subskrypcji). Instrukcje serwera zakazują klientowi cytowania CVE z pamięci;
+twardego post-checku z `ask` tu nie ma, bo odpowiedź pisze klient.
+
+**Claude Code** (dla wszystkich projektów; nowa sesja zobaczy narzędzia `mcp__cvescout__*`):
+
+```bash
+claude mcp add --scope user cvescout -- "$PWD/.venv/bin/cvescout" mcp
+```
+
+```bat
+claude mcp add --scope user cvescout -- C:\sciezka\do\cvescout\.venv\Scripts\cvescout.exe mcp
+```
+
+**Claude Desktop** – w `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
+Windows: `%APPDATA%\Claude\`):
+
+```json
+{
+  "mcpServers": {
+    "cvescout": {
+      "command": "/Users/ty/dev/cvescout/.venv/bin/cvescout",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Na Windows `"command": "C:\\sciezka\\do\\cvescout\\.venv\\Scripts\\cvescout.exe"`. Klucze `NVD_API_KEY` i `GITHUB_TOKEN`
+można przekazać w polu `"env"` tej samej sekcji (albo `claude mcp add -e NVD_API_KEY=...`).
+
+**Własny agent (Python):**
+
+```python
+from mcp import Client, StdioServerParameters
+
+async with Client(StdioServerParameters(command=".venv/bin/cvescout", args=["mcp"])) as client:
+    result = await client.call_tool("search_recent_cves", {"days": 1, "source": "cvelist", "rce_only": True})
+    print(result.content[0].text)  # JSON
+```
 
 ## Testy
 

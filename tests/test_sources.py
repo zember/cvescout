@@ -394,3 +394,179 @@ def test_full_cpe_with_version_still_matches_product(monkeypatch):
     monkeypatch.setattr(sources, "_get_json", lambda url, headers=None: {"totalResults": 1, "vulnerabilities": vulns})
     data = sources.fetch_nvd_recent(since="2020-01-01", cpe="cpe:2.3:a:haxx:curl:7.88.0:*:*:*:*:*:*:*")
     assert [c["id"] for c in data["cves"]] == ["CVE-2023-7"]
+
+
+def _rec(cve_id, published, updated=None, score=None, kev=False, product="widget", desc=None, state="PUBLISHED"):
+    cna = {
+        "title": f"title {cve_id}",
+        "descriptions": [{"lang": "en-US", "value": desc or f"desc {cve_id}"}],
+        "affected": [{"vendor": "Acme", "product": product,
+                      "versions": [{"version": "1.0", "lessThan": "1.4", "status": "affected"},
+                                   {"version": "1.4", "status": "unaffected"}]}],
+        "references": [{"url": "https://example.com/advisory", "tags": ["vendor-advisory"]}],
+    }
+    if score is not None:
+        cna["metrics"] = [{"cvssV3_1": {"baseScore": score, "baseSeverity": "HIGH" if score < 9 else "CRITICAL",
+                                        "vectorString": "CVSS:3.1/AV:N/AC:L", "version": "3.1"}}]
+    adp = [{"metrics": [{"other": {"type": "kev", "content": {"dateAdded": "2026-10-25"}}}]}] if kev else []
+    return {
+        "cveMetadata": {"cveId": cve_id, "state": state, "datePublished": published,
+                        "dateUpdated": updated or published},
+        "containers": {"cna": cna, "adp": adp},
+    }
+
+
+def _zip(*records):
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for r in records:
+            z.writestr(f"deltaCves/{r['cveMetadata']['cveId']}.json", json.dumps(r))
+    return buf.getvalue()
+
+
+def test_normalize_cvelist_merges_cna_and_adp():
+    rec = _rec("CVE-2026-7", "2026-10-26T09:00:00.000Z", kev=True)
+    rec["containers"]["cna"]["problemTypes"] = [{"descriptions": [{"cweId": "CWE-78", "type": "CWE"}]}]
+    rec["containers"]["adp"].append({
+        "metrics": [{"cvssV2_0": {"baseScore": 7.5, "vectorString": "AV:N/AC:L/Au:N/C:P/I:P/A:P", "version": "2.0"}}],
+        "references": [{"url": "https://example.com/poc", "tags": ["exploit"]}],
+        "affected": [{"cpes": ["cpe:2.3:a:acme:widget:*:*:*:*:*:*:*:*"]}],
+    })
+    c = sources.normalize_cvelist(rec)
+    assert (c["cvss_score"], c["severity"], c["cvss_version"]) == (7.5, "HIGH", "2.0")
+    assert c["exploit"] == "active" and c["exploit_refs"] == ["https://example.com/poc"]
+    assert c["rce"] and c["cwe"] == ["CWE-78"]
+    assert c["affected_products"] == ["acme:widget"]
+    assert c["affected"] == [{"vendor": "Acme", "product": "widget", "versions": ["1.0 - <1.4"]}]
+
+
+@pytest.mark.parametrize("cve_id, path", [
+    ("CVE-2026-104596", "2026/104xxx/CVE-2026-104596.json"),
+    ("cve-2021-1234", "2021/1xxx/CVE-2021-1234.json"),
+    ("CVE-2014-0160", "2014/0xxx/CVE-2014-0160.json"),
+])
+def test_cvelist_record_url(cve_id, path):
+    assert sources.cvelist_record_url(cve_id) == f"{sources.CVELIST_RAW_URL}/{path}"
+
+
+def test_cvelist_record_url_rejects_garbage():
+    with pytest.raises(sources.SourceError):
+        sources.cvelist_record_url("GHSA-xxxx-yyyy")
+
+
+def _fake_cvelist(monkeypatch, zips, log=(), records=None):
+    """zips: {url suffix: zip bytes or None (404)}; records: {cve_id: record} for raw fetches."""
+    requested = []
+
+    def fake_get(url, parse, headers=None, retries=3, retry_on=(), ttl=0):
+        requested.append(url)
+        if url == sources.CVELIST_LATEST_URL:
+            return {"tag_name": "cve_2026-10-26_1100Z", "assets": [
+                {"name": "2026-10-26_all_CVEs_at_midnight.zip.zip", "browser_download_url": "all.zip"},
+                {"name": "2026-10-26_delta_CVEs_at_1100Z.zip", "browser_download_url": "latest.zip"},
+            ]}
+        if url == sources.CVELIST_DELTALOG_URL:
+            return list(log)
+        if url == sources.KEV_URL:
+            return {"vulnerabilities": []}
+        for suffix, body in zips.items():
+            if url.endswith(suffix):
+                if body is None:
+                    raise sources.SourceError("github.com: HTTP 404")
+                return parse(body)
+        for cve_id, rec in (records or {}).items():
+            if url == sources.cvelist_record_url(cve_id):
+                return rec
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(sources, "_get", fake_get)
+    return requested
+
+
+def test_cvelist_recent_merges_days_and_fills_gaps_from_delta_log(monkeypatch):
+    zips = {
+        "2026-10-24_delta_CVEs_at_end_of_day.zip": _zip(
+            _rec("CVE-2026-1", "2026-10-24T10:00:00.000Z"),  # before the window
+            _rec("CVE-2026-2", "2026-10-24T13:00:00.000Z", score=9.8),
+        ),
+        "2026-10-25_delta_CVEs_at_end_of_day.zip": _zip(
+            # later version of CVE-2026-2: CISA added it to KEV
+            _rec("CVE-2026-2", "2026-10-24T13:00:00.000Z", "2026-10-25T08:00:00.000Z", score=9.8, kev=True),
+            _rec("CVE-2026-9", "2026-10-25T09:00:00.000Z", state="REJECTED"),
+        ),
+        "latest.zip": _zip(_rec("CVE-2026-3", "2026-10-26T09:00:00.000Z", score=5.0)),
+    }
+    log = [{"new": [
+        {"cveId": "CVE-2026-3", "dateUpdated": "2026-10-26T09:00:00.000Z"},
+        {"cveId": "CVE-2026-1004", "dateUpdated": "2026-10-26T00:30:00.000Z"},  # missing from every zip
+        {"cveId": "CVE-2026-1005", "dateUpdated": "2026-10-20T00:30:00.000Z"},  # before the window
+    ]}]
+    records = {"CVE-2026-1004": _rec("CVE-2026-1004", "2026-10-26T00:30:00.000Z")}
+    requested = _fake_cvelist(monkeypatch, zips, log, records)
+
+    data = sources.fetch_cvelist_recent(days=2)
+    assert [c["id"] for c in data["cves"]] == ["CVE-2026-3", "CVE-2026-1004", "CVE-2026-2"]
+    assert data["cves"][2]["exploit"] == "active"
+    assert data["fetched_individually"] == 1 and data["missing_days"] == []
+    assert data["data_as_of"] == "cve_2026-10-26_1100Z"
+    assert "all.zip" not in requested
+
+    data = sources.fetch_cvelist_recent(days=2, min_score=9, poc=True)
+    assert [c["id"] for c in data["cves"]] == ["CVE-2026-2"]
+
+
+def test_cvelist_keywords_match_products_and_missing_day_is_reported(monkeypatch):
+    zips = {
+        "2026-10-25_delta_CVEs_at_end_of_day.zip": None,
+        "latest.zip": _zip(
+            _rec("CVE-2026-20", "2026-10-26T09:00:00.000Z", product="NGINX Plus"),
+            _rec("CVE-2026-21", "2026-10-26T10:00:00.000Z", desc="Bug in libcurl before 8.20"),
+            _rec("CVE-2026-22", "2026-10-26T11:00:00.000Z"),
+        ),
+    }
+    _fake_cvelist(monkeypatch, zips)
+    data = sources.fetch_cvelist_recent(days=1, keyword=["nginx", "CURL"])
+    assert [c["id"] for c in data["cves"]] == ["CVE-2026-21", "CVE-2026-20"]
+    assert data["missing_days"] == ["2026-10-25"]
+
+
+def test_cvelist_rejects_ranges_over_30_days():
+    with pytest.raises(sources.SourceError, match="30 days"):
+        sources.fetch_cvelist_recent(since="2026-09-01")
+
+
+def test_cve_details_falls_back_to_cvelist_when_nvd_is_down(monkeypatch):
+    def nvd_down(cve_id):
+        raise sources.SourceError("services.nvd.nist.gov: HTTP 503")
+
+    monkeypatch.setattr(sources, "fetch_nvd_cve", nvd_down)
+    monkeypatch.setattr(sources, "fetch_cvelist_cve",
+                        lambda cve_id: sources.normalize_cvelist(_rec(cve_id, "2026-10-26T09:00:00.000Z")))
+    monkeypatch.setattr(sources, "enrich", lambda items, key="id": items)
+    monkeypatch.setattr(sources, "fetch_ghsa_for_cve", lambda cve_id: [])
+    import json
+
+    data = json.loads(tools.get_cve_details.func("CVE-2026-30"))
+    assert data["id"] == "CVE-2026-30" and "NVD unavailable" in data["note"]
+    assert data["affected"][0]["versions"] == ["1.0 - <1.4"]
+
+
+def test_mcp_server_exposes_all_tools_read_only():
+    import asyncio
+
+    from mcp import Client
+
+    from cvescout.mcp_server import server
+
+    async def list_tools():
+        async with Client(server) as client:
+            return (await client.list_tools()).tools
+
+    listed = {t.name: t for t in asyncio.run(list_tools())}
+    assert set(listed) == {t.name for t in tools.ALL_TOOLS}
+    assert "source" in listed["search_recent_cves"].input_schema["properties"]
+    assert all(t.annotations.read_only_hint for t in listed.values())
