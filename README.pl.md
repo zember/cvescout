@@ -42,6 +42,11 @@ python -m venv .venv
 .venv\Scripts\pip install -e .[dev]
 ```
 
+Polecenie `cvescout` jest w środowisku wirtualnym, więc w każdym nowym terminalu aktywuj je
+(`source .venv/bin/activate`, w cmd `.venv\Scripts\activate`) albo zobacz [Uruchamianie bez `activate`](#uruchamianie-bez-activate).
+Uwaga: `./cvescout` w katalogu projektu to katalog pakietu Pythona, a nie plik wykonywalny – jego uruchomienie kończy się
+błędem `permission denied`.
+
 Klucze (wszystkie opcjonalne poza `ANTHROPIC_API_KEY` dla `ask`); w cmd zamiast `export` użyj `set` (lub `setx` na stałe):
 
 ```bash
@@ -54,7 +59,15 @@ export ANTHROPIC_API_KEY=...  # tylko dla `cvescout ask` (albo `ant auth login`)
 
 - **Windows:** w katalogu projektu jest `cvescout.cmd`. Uruchom `C:\sciezka\do\cvescout\cvescout.cmd feed --days 2`
   albo dodaj katalog projektu do zmiennej PATH – wtedy w dowolnym oknie cmd działa samo `cvescout feed --days 2`.
-- **macOS / Linux:** `ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout` (katalog `~/.local/bin` musi być w PATH).
+- **macOS / Linux:** w katalogu projektu:
+
+  ```bash
+  mkdir -p ~/.local/bin && ln -s "$PWD/.venv/bin/cvescout" ~/.local/bin/cvescout
+  ```
+
+  Jeśli `~/.local/bin` nie ma jeszcze w PATH, dopisz `export PATH="$HOME/.local/bin:$PATH"` do `~/.zshrc` (lub `~/.bashrc`).
+  Zamiast tego możesz dodać alias w tym samym pliku: `alias cvescout="/sciezka/do/cvescout/.venv/bin/cvescout"`.
+  Nie dopisuj do PATH całego `.venv/bin` – przesłoniłby `python` i `pip` wszędzie.
 - **Dowolny system:** `pipx install -e .` instaluje `cvescout` globalnie w osobnym środowisku.
 
 ## Użycie
@@ -75,7 +88,7 @@ cvescout feed --days 1 --json
 | `cvescout feed`, `cvescout cpe` | człowiek | tabela: data, ID, CVSS, znaczniki `RCE`/`PoC`/`EXPLOITED`, opis skrócony do 100 znaków |
 | `cvescout feed --json`, `cvescout cpe --json` | skrypty, inne agenty, pipeline'y | pełne dane: cały opis, CWE, wektor CVSS, linki, `exploit_refs`, `affected_products`, EPSS/KEV (z `--enrich`) |
 | `cvescout ask` | człowiek | odpowiedź agenta Claude w języku pytania |
-| `cvescout mcp` | agenty (Claude Code, Claude Desktop, inne klienty MCP) | narzędzia zwracające JSON, jak w `ask` |
+| `cvescout mcp` | agenty (Claude Code, Claude Desktop, Codex, inne klienty MCP) | narzędzia zwracające JSON, jak w `ask` |
 
 Tabela może się zmieniać i ucina dane – programy powinny czytać `--json`. Błędy trafiają na stderr, a kod wyjścia wynosi 1,
 więc skrypt może łatwo wykryć niepowodzenie. Agent wbudowany w `ask` nie czyta tabeli – jego narzędzia dostają JSON bezpośrednio.

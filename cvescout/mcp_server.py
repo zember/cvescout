@@ -1,5 +1,5 @@
 """MCP server exposing the agent's tools, so any MCP client (Claude Code, Claude Desktop,
-your own agent) can query live CVE data without an Anthropic API key of its own."""
+Codex, your own agent) can query live CVE data without an Anthropic API key of its own."""
 
 from __future__ import annotations
 

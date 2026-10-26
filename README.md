@@ -88,7 +88,7 @@ cvescout feed --days 1 --json
 | `cvescout feed`, `cvescout cpe` | people | table: date, ID, CVSS, `RCE`/`PoC`/`EXPLOITED` tags, description cut to 100 characters |
 | `cvescout feed --json`, `cvescout cpe --json` | scripts, other agents, pipelines | full data: whole description, CWE, CVSS vector, links, `exploit_refs`, `affected_products`, EPSS/KEV (with `--enrich`) |
 | `cvescout ask` | people | the Claude agent's answer, in the language of the question |
-| `cvescout mcp` | agents (Claude Code, Claude Desktop, other MCP clients) | tools returning JSON, as in `ask` |
+| `cvescout mcp` | agents (Claude Code, Claude Desktop, Codex, other MCP clients) | tools returning JSON, as in `ask` |
 
 The table may change and truncates data, so programs should read `--json`. Errors go to stderr with exit code 1, so a
 script can detect failures. The agent behind `ask` does not read the table; its tools get JSON directly.

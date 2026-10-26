@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--json", action="store_true")
     watch.set_defaults(func=_watch)
 
-    mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop and other agents")
+    mcp = sub.add_parser("mcp", help="run as an MCP server on stdio, for Claude Code, Claude Desktop, Codex and other agents")
     mcp.set_defaults(func=_mcp)
 
     args = parser.parse_args(argv)
