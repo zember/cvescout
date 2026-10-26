@@ -25,7 +25,7 @@ post-check: any CVE in its answer that no tool returned is flagged with a warnin
 
 ## Installation
 
-Requires Python 3.11 or newer.
+Works on Linux, macOS and Windows; requires Python 3.11 or newer (tested in CI on all three with Python 3.11 and 3.14).
 
 macOS / Linux:
 

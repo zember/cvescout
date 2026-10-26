@@ -32,7 +32,7 @@ git clone https://github.com/zember/cvescout.git && cd cvescout
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
 
-Wymaga Pythona 3.11 lub nowszego.
+Działa na Linuksie, macOS i Windows; wymaga Pythona 3.11 lub nowszego (testy w CI na wszystkich trzech, Python 3.11 i 3.14).
 
 Windows (cmd):
 
