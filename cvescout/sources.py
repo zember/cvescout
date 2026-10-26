@@ -978,6 +978,8 @@ def enrich(cves: list[dict], key: str = "id") -> list[dict]:
 
 # EPSS at or above this (10% chance of exploitation within 30 days) weighs like a public PoC
 RISK_EPSS_HIGH = 0.1
+# EPSS at or above this (top ~10% of CVEs) makes a high-CVSS bug worth planning a fix for
+RISK_EPSS_NOTABLE = 0.01
 PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
@@ -988,7 +990,8 @@ def risk(item: dict) -> dict:
     scaled so that RISK_EPSS_HIGH counts as 0.7) + 40% CVSS + 10% likely RCE.
     Threat weighs most because most CVEs, even critical ones, are never
     exploited. priority is a label for triage: critical = exploited now,
-    high = exploit likely and impact high, medium = one of the two.
+    high = exploit likely and impact high, medium = exploit likely, or
+    CVSS >= 9, or CVSS >= 7 with likely RCE or EPSS >= 1%; low = the rest.
     """
     score, exploit, rce = item.get("cvss_score"), item.get("exploit"), bool(item.get("rce"))
     epss = (item.get("epss") or {}).get("epss")
@@ -1015,7 +1018,9 @@ def risk(item: dict) -> dict:
         priority = "critical"
     elif (likely and severe) or (rce and (score or 0) >= 9):
         priority = "high"
-    elif likely or (score or 0) >= 7:
+    elif likely or (score or 0) >= 9 or (
+        (score or 0) >= 7 and (rce or (epss or 0) >= RISK_EPSS_NOTABLE)
+    ):
         priority = "medium"
     else:
         priority = "low"

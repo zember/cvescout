@@ -598,6 +598,11 @@ def test_nvd_searches_skip_rejected_cves(monkeypatch):
     ({"cvss_score": 9.8, "epss": {"epss": 0.0004}}, 39, "medium"),
     ({"cvss_score": 4.3, "exploit": "poc", "epss": {"epss": 0.001}}, 52, "medium"),
     ({"cvss_score": 4.3, "epss": None}, 17, "low"),
+    # CVSS 7-8.9 alone is not enough: it also needs likely RCE or EPSS >= 1%
+    ({"cvss_score": 8.1, "epss": {"epss": 0.002}}, 33, "low"),
+    ({"cvss_score": 8.1, "rce": True, "epss": {"epss": 0.002}}, 43, "medium"),
+    ({"cvss_score": 7.5, "epss": {"epss": 0.02}}, 37, "medium"),
+    ({"cvss_score": 9.1, "epss": None}, 36, "medium"),
     ({"cvss_score": None, "exploit": "poc", "epss": None}, 55, "high"),
 ])
 def test_risk(item, score, priority):

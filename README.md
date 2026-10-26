@@ -121,8 +121,10 @@ cvescout feed --ghsa --days 30 --ecosystem npm --sort risk
 |---|---|
 | `critical` | aktywnie wykorzystywana (CISA KEV, SSVC „active”, CVSS v4 `E:A`) |
 | `high` | publiczny exploit lub EPSS ≥ 10% przy CVSS ≥ 7 (lub nieznanym), albo prawdopodobne RCE z CVSS ≥ 9 |
-| `medium` | tylko jedno z dwóch: exploit/EPSS ≥ 10% albo CVSS ≥ 7 |
-| `low` | pozostałe |
+| `medium` | publiczny exploit lub EPSS ≥ 10% (przy niższym CVSS), albo CVSS ≥ 9, albo CVSS ≥ 7 razem z prawdopodobnym RCE **lub** EPSS ≥ 1% |
+| `low` | pozostałe, m.in. CVSS 7–8.9 bez RCE, bez exploita i z EPSS < 1% |
+
+Do `medium` wystarczy RCE **albo** EPSS ≥ 1%. Żeby zobaczyć tylko RCE, dodaj filtr: `cvescout feed --days 7 --sort risk --rce`.
 
 `score` (0–100) porządkuje CVE w obrębie priorytetu: 50% zagrożenie (wykorzystywana 1.0, PoC 0.7, EPSS przeskalowany tak,
 że 10% liczy się jak PoC) + 40% CVSS + 10% prawdopodobne RCE. Zagrożenie waży najwięcej, bo większość CVE – nawet
